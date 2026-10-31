@@ -217,7 +217,7 @@ class TestLaunchClaude:
         assert ctx.read_text() == "report rules"
         assert launch.call_args.args[2] == (
             "claude --dangerously-skip-permissions --resume session-11 "
-            f"--append-system-prompt \"$(cat {ctx})\""
+            f"--append-system-prompt-file {ctx}"
         )
 
     def test_resume_without_a_launch_context_stays_bare(self, monkeypatch, tmp_path):
@@ -249,7 +249,7 @@ class TestRecordLaunchCommand:
         ctx = tmp_path / "ctx" / "session-20.md"
         assert (tmp_path / "ctx" / "session-20.cmd").read_text() == (
             "claude --dangerously-skip-permissions --session-id session-20 "
-            f"--append-system-prompt \"$(cat {ctx})\"")
+            f"--append-system-prompt-file {ctx}")
 
     def test_a_resume_overwrites_the_recorded_command(self, monkeypatch, tmp_path):
         self._no_agent(monkeypatch, tmp_path)
@@ -260,7 +260,7 @@ class TestRecordLaunchCommand:
         ctx = tmp_path / "ctx" / "session-21.md"
         assert (tmp_path / "ctx" / "session-21.cmd").read_text() == (
             "claude --dangerously-skip-permissions --resume session-21 "
-            f"--append-system-prompt \"$(cat {ctx})\"")
+            f"--append-system-prompt-file {ctx}")
 
     def test_a_failed_launch_records_no_command(self, monkeypatch, tmp_path):
         self._no_agent(monkeypatch, tmp_path)

@@ -461,13 +461,13 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
         ctx_path = launch_context_path(session_uuid, context)
         args = (
             f" --session-id {shlex.quote(session_uuid)} "
-            f"--append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
+            f"--append-system-prompt-file {shlex.quote(ctx_path)}"
         )
     else:
         ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
         args = f" --resume {shlex.quote(session_uuid)}"
         if os.path.isfile(ctx_path) and os.path.getsize(ctx_path) > 0:
-            args += f" --append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
+            args += f" --append-system-prompt-file {shlex.quote(ctx_path)}"
     launch_pane_command(key, cwd, claude_cmd(config, cwd=cwd) + args)
     record_launch_command(session_uuid, claude_cmd(config, redact=True, cwd=cwd) + args)
 
