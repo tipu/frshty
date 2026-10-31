@@ -179,3 +179,11 @@ def test_pane_claude_command_keeps_shim_first_over_a_path_override():
 def test_pane_claude_command_expands_a_home_path_override():
     cmd = terminal.claude_cmd({"llm": {"claude": {"env": {"PATH": "~/.local/bin"}}}})
     assert f"PATH={llm.LSP_SHIM_DIR}{os.pathsep}{os.path.expanduser('~/.local/bin')} " in cmd
+
+
+def test_the_review_plugin_keeps_every_request_on_the_semantic_server():
+    manifest = json.loads(
+        (llm.REVIEW_TS_PLUGIN_DIR / ".claude-plugin" / "plugin.json").read_text())
+    server = manifest["lspServers"]["typescript"]
+    assert server["command"] == SHIM.name
+    assert server["initializationOptions"]["tsserver"]["useSyntaxServer"] == "never"
