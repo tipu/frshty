@@ -31,11 +31,6 @@ ATTRIBUTION_STRIPPED_REASON = (
     "Co-Authored-By trailer, no line saying an agent produced the work."
 )
 
-LSP_TRIMMED_REASON = (
-    "The LSP gate removed a definition grep from this command and ran the "
-    "rest. The output says which grep and which LSP call to make next."
-)
-
 QUESTION_DUPLICATE_REASON = (
     "You already asked this question and it is unanswered on the work board, "
     "so this second ask was dropped and the operator did not see it. Do not "
@@ -261,24 +256,10 @@ def _lsp_reason(data: dict) -> str:
 
 
 def _lsp_output(data: dict) -> dict | None:
-    """The hook answer of the LSP gate: None to allow, an allow with the
-    rewritten command when lsp_gate.bash_rewrite can drop the refused grep
-    and run the rest, a deny otherwise."""
+    """The hook answer of the LSP gate: None to allow, a deny otherwise."""
     reason = _lsp_reason(data)
     if not reason:
         return None
-    tool_input = data.get("tool_input") or {}
-    command = tool_input.get("command") or ""
-    if data.get("tool_name") == "Bash" and not any(
-            _mentions(command, w) for w in ("commit", "push", "merge")):
-        trimmed = lsp_gate.bash_rewrite(command, data.get("transcript_path") or "")
-        if trimmed and not sleep_gate.bash_reason(trimmed, bool(tool_input.get("run_in_background"))):
-            return {"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
-                "permissionDecisionReason": LSP_TRIMMED_REASON,
-                "updatedInput": {**tool_input, "command": trimmed},
-            }}
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "deny",
