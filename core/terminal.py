@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 import core.state as state
 import core.tmux as tmux_target
-from core.llm import DEEPSEEK_ENV, codex_review_checkout_args, review_checkout_args
+from core.llm import DEEPSEEK_ENV, codex_review_checkout_args, review_checkout_args, with_lsp_shim
 from core.paths import frshty_root
 
 MAX_SCROLLBACK = 1024 * 1024
@@ -104,6 +104,8 @@ def claude_cmd(config: dict | None = None, redact: bool = False, cwd: str = "") 
     config_dir = claude_cfg.get("config_dir")
     if config_dir and "CLAUDE_CONFIG_DIR" not in env:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    if "PATH" in env:
+        env["PATH"] = with_lsp_shim(os.path.expanduser(env["PATH"]))
     bin_name = claude_cfg.get("bin", "claude")
     review = review_checkout_args(cwd)
     return (f"{_env_prefix(env, redact, CONFIG_DIR_VARS['claude'])}"
@@ -280,7 +282,7 @@ def _child_env():
         "HOME": os.path.expanduser("~"),
         "USER": os.environ.get("USER", "claude"),
         "TERM": "xterm-256color",
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PATH": with_lsp_shim(os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "TMUX": "",
     }
@@ -290,7 +292,7 @@ def _child_env():
 
 
 def _pane_env_args() -> list[str]:
-    args = []
+    args = ["-e", f"PATH={_child_env()['PATH']}"]
     for key in IMAGE_ENV + ALIAS_ENV:
         if os.environ.get(key):
             args += ["-e", f"{key}={os.environ[key]}"]

@@ -18,7 +18,8 @@
       },
       "initializationOptions": {
         "tsserver": {
-          "path": "/usr/lib/node_modules/typescript/lib/tsserver.js"
+          "path": "/usr/lib/node_modules/typescript/lib/tsserver.js",
+          "useSyntaxServer": "never"
         }
       }
     }
