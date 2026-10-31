@@ -1399,13 +1399,11 @@ def _ensure_review_worktree(config, pr) -> Path | None:
         subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         deps.install_worktree_deps(config, pr["repo"], worktree_path, "review_dep_commands")
-        deps.generate_review_prisma(config, pr["repo"], worktree_path)
         return worktree_path
 
     added = git_util.add_detached_worktree(repo_path, worktree_path, pr["branch"])
     if added:
         deps.install_worktree_deps(config, pr["repo"], added, "review_dep_commands")
-        deps.generate_review_prisma(config, pr["repo"], added)
     return added
 
 
