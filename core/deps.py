@@ -249,7 +249,7 @@ def _prisma_generate(entry: dict, wt_path: Path) -> str | None:
     if dest is None:
         return f"output {entry['output']} passes through a symlink"
     try:
-        text = schema.read_text()
+        text = schema.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         return f"schema {entry['schema']} is unreadable: {e}"
     with tempfile.TemporaryDirectory(prefix="frshty-prisma-") as tmp:
@@ -259,7 +259,8 @@ def _prisma_generate(entry: dict, wt_path: Path) -> str | None:
                           for k, v in (entry.get("options") or {}).items())
         (stage / "schema.prisma").write_text(
             text + f"\n\ngenerator {REVIEW_PRISMA_GENERATOR} {{\n"
-            f"  provider = \"prisma-client\"\n  output = {json.dumps(str(out))}\n{options}}}\n")
+            f"  provider = \"prisma-client\"\n  output = {json.dumps(str(out))}\n{options}}}\n",
+            encoding="utf-8")
         (stage / "prisma.config.mjs").write_text(
             f"export default {{ schema: {json.dumps(str(stage / 'schema.prisma'))} }}\n")
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(stage),
