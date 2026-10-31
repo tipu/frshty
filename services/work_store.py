@@ -1727,7 +1727,8 @@ def record_progress(session_id: str, transcript_path: str,
         ).fetchone()
         if not run:
             return ""
-        item = c.execute("SELECT current_checkpoint FROM work_items WHERE id = ?",
+        item = c.execute("SELECT current_checkpoint, COALESCE(instance_key, '') AS instance_key "
+                         "FROM work_items WHERE id = ?",
                          (run["work_item_id"],)).fetchone()
         if not item or item["current_checkpoint"] == newest:
             return ""
@@ -1744,6 +1745,11 @@ def record_progress(session_id: str, transcript_path: str,
             "VALUES (?, ?, 'progress', ?, ?)",
             (run["work_item_id"], run["id"], db.dump_json({"text": newest}), now),
         )
+        instance_key = item["instance_key"] or BOARD_INSTANCE_KEY
+        with contextlib.redirect_stdout(sys.stderr):
+            log.emit("work_progress", f"work item {run['work_item_id']}: {newest}",
+                     meta={"work_item_id": run["work_item_id"], "session_id": session_id},
+                     job=instance_key, instance_key=instance_key, conn=c)
     return newest
 
 
