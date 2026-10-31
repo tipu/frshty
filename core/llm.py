@@ -98,6 +98,13 @@ _MIN_PLAN_BYTES = int(os.environ.get("FRSHTY_MIN_PLAN_BYTES", "400"))
 
 READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "Bash(git:*)"]
 WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"]
+LSP_SHIM_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lsp"
+
+
+def with_lsp_shim(path: str | None) -> str:
+    """`path` with scripts/lsp first, so an agent's TypeScript LSP plugin runs
+    the shim that keeps every request on the semantic tsserver."""
+    return os.pathsep.join(p for p in (str(LSP_SHIM_DIR), path) if p)
 
 
 def _env():
@@ -489,6 +496,7 @@ class ClaudeProvider(LLMProvider):
         env = {**_env(), lsp_gate.GATE_ENV: "1"}
         for key, value in self.env_overrides.items():
             env[key] = os.path.expanduser(value)
+        env["PATH"] = with_lsp_shim(env.get("PATH"))
         return env
 
     def _cmd(self, *args: str) -> list[str]:
