@@ -30,6 +30,40 @@ class TestPreflightInstance:
         assert any(c["name"] == "github.repo[alice/myrepo]" and c["ok"] for c in checks)
         assert any(c["name"] == "workspace.root" and c["ok"] for c in checks)
 
+    def test_missing_repo_fails_when_workspace_has_repos(self, tmp_path):
+        cfg = _cfg(tmp_path, github={"repo": ""})
+        with patch.object(preflight, "_run") as run:
+            ok, checks = preflight.preflight_instance(cfg)
+        assert not ok
+        assert {"name": "github.repo", "ok": False, "detail": "not configured"} in checks
+        run.assert_not_called()
+
+    def test_missing_repo_passes_without_workspace_repos(self, tmp_path):
+        cfg = _cfg(tmp_path, github={"repo": ""})
+        cfg["workspace"]["repos"] = []
+        with patch.object(preflight, "_run") as run:
+            ok, checks = preflight.preflight_instance(cfg)
+        assert ok
+        assert not any(c["name"].startswith("github.repo") for c in checks)
+        run.assert_not_called()
+
+    def test_missing_repo_fails_with_projects_dir(self, tmp_path):
+        cfg = _cfg(tmp_path, github={"repo": ""})
+        del cfg["workspace"]["repos"]
+        cfg["workspace"]["projects_dir"] = "."
+        with patch.object(preflight, "_run"):
+            ok, checks = preflight.preflight_instance(cfg)
+        assert not ok
+        assert {"name": "github.repo", "ok": False, "detail": "not configured"} in checks
+
+    def test_missing_repo_fails_when_a_platform_feature_is_on(self, tmp_path):
+        cfg = _cfg(tmp_path, github={"repo": ""}, features={"review_prs": True})
+        cfg["workspace"]["repos"] = []
+        with patch.object(preflight, "_run"):
+            ok, checks = preflight.preflight_instance(cfg)
+        assert not ok
+        assert {"name": "github.repo", "ok": False, "detail": "not configured"} in checks
+
     def test_workspace_root_missing(self, tmp_path):
         cfg = _cfg(tmp_path)
         cfg["workspace"]["root"] = str(tmp_path / "does-not-exist")
