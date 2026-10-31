@@ -997,7 +997,8 @@ def api_reset_terminal(key: str):
     ws = _config["workspace"]
     ticket_dir = ws["root"] / ws["tickets_dir"] / slug
     terminal.kill_terminal(key)
-    terminal.launch_pane_command(key, str(ticket_dir), terminal.claude_cmd(_config))
+    terminal.launch_pane_command(key, str(ticket_dir),
+                                 terminal.claude_cmd(_config, cwd=str(ticket_dir)))
     return {"status": "ok"}
 
 
@@ -1058,7 +1059,7 @@ def api_start_discuss(key: str, cont: bool = False):
         schedule_discuss_kill(discuss_key)
         return {"status": "running", "discuss_key": discuss_key}
     if not health.get("agent_running"):
-        base = terminal.claude_cmd(_config)
+        base = terminal.claude_cmd(_config, cwd=str(ticket_dir))
         terminal.launch_pane_command(
             discuss_key, str(ticket_dir), f"{base} --continue" if cont else base)
     schedule_discuss_kill(discuss_key)
