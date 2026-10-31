@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+/*
+ * Runs the real typescript-language-server with tsserver.useSyntaxServer set
+ * to "never" in the initialize request, unless the client already set it.
+ *
+ * With the default "auto", the server starts a second tsserver in
+ * partialSemantic mode and sends references, navto, definition and quickinfo
+ * to it while the semantic tsserver loads the project. That server holds only
+ * an inferred project of the open files, so the first findReferences of a
+ * session returns only references in open files. "never" sends every request
+ * to the semantic tsserver, which answers after the whole tsconfig project
+ * has loaded.
+ */
+const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+
+const NAME = "typescript-language-server";
+const SELF = fs.realpathSync(__filename);
+
+function realServer() {
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    const candidate = path.resolve(dir, NAME);
+    try {
+      if (fs.realpathSync(candidate) === SELF) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function withSemanticOnly(body) {
+  let message;
+  try {
+    message = JSON.parse(body.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!message || message.method !== "initialize") return null;
+  const params = message.params || (message.params = {});
+  const options = params.initializationOptions || (params.initializationOptions = {});
+  const tsserver = options.tsserver || (options.tsserver = {});
+  if (tsserver.useSyntaxServer === undefined) tsserver.useSyntaxServer = "never";
+  return Buffer.from(JSON.stringify(message), "utf8");
+}
+
+const server = realServer();
+if (!server) {
+  process.stderr.write(`${NAME}: no other ${NAME} on PATH\n`);
+  process.exit(127);
+}
+
+const child = spawn(server, process.argv.slice(2), { stdio: ["pipe", "inherit", "inherit"] });
+child.on("error", (error) => {
+  process.stderr.write(`${NAME}: ${server}: ${error.message}\n`);
+  process.exit(1);
+});
+child.on("exit", (code, signal) => {
+  if (signal) {
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code === null ? 1 : code);
+});
+child.stdin.on("error", () => {});
+
+let pending = Buffer.alloc(0);
+let passthrough = false;
+
+function forward(chunk) {
+  if (passthrough) {
+    child.stdin.write(chunk);
+    return;
+  }
+  pending = Buffer.concat([pending, chunk]);
+  for (;;) {
+    const headerEnd = pending.indexOf("\r\n\r\n");
+    if (headerEnd < 0) return;
+    const match = /Content-Length:\s*(\d+)/i.exec(pending.subarray(0, headerEnd).toString("ascii"));
+    if (!match) break;
+    const start = headerEnd + 4;
+    const stop = start + Number(match[1]);
+    if (pending.length < stop) return;
+    const rewritten = withSemanticOnly(pending.subarray(start, stop));
+    if (rewritten) {
+      child.stdin.write(`Content-Length: ${rewritten.length}\r\n\r\n`);
+      child.stdin.write(rewritten);
+      pending = pending.subarray(stop);
+      break;
+    }
+    child.stdin.write(pending.subarray(0, stop));
+    pending = pending.subarray(stop);
+  }
+  passthrough = true;
+  if (pending.length) child.stdin.write(pending);
+  pending = Buffer.alloc(0);
+}
+
+process.stdin.on("data", forward);
+process.stdin.on("end", () => {
+  if (pending.length) child.stdin.write(pending);
+  child.stdin.end();
+});
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(signal, () => child.kill(signal));
+}
