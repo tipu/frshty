@@ -173,7 +173,7 @@ class TestRunDepCommand:
     def test_routes_pipenv_through_shared_venv(self, fake_config, tmp_path):
         wt = _make_worktree(tmp_path, "a")
         with patch("core.deps.ensure_shared_venv", return_value=True) as ensure:
-            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install --dev")
+            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install --dev") is None
         ensure.assert_called_once_with(fake_config, "repo", wt,
                                        dep_cmd="pipenv install --dev")
 
@@ -185,7 +185,7 @@ class TestRunDepCommand:
         wt = tmp_path / "wt"
         wt.mkdir()
         with patch("core.deps.subprocess.run") as run:
-            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install") is False
+            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install")
         assert not run.called, (
             "pipenv must not run in a worktree with no Pipfile; it would only "
             f"write a skeleton one. got: {run.call_args}"
@@ -200,7 +200,7 @@ class TestRunDepCommand:
         (wt / "Pipfile.lock").write_text('{"default": {}}')
         with patch("core.deps.ensure_shared_venv") as ensure, \
              patch("core.deps.subprocess.run") as run:
-            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install --dev") is False
+            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install --dev")
         assert not ensure.called and not run.called, (
             f"pipenv must not run without a Pipfile; ensure={ensure.call_args} run={run.call_args}")
 
@@ -208,14 +208,14 @@ class TestRunDepCommand:
         wt = _make_worktree(tmp_path, "a")
         with patch("core.deps.subprocess.run") as run:
             run.return_value.returncode = 0
-            assert deps.run_dep_command(fake_config, "repo", wt, "npm ci")
+            assert deps.run_dep_command(fake_config, "repo", wt, "npm ci") is None
         assert run.call_args.args[0] == ["npm", "ci"]
 
     def test_missing_binary_is_nonfatal(self, fake_config, tmp_path):
         wt = tmp_path / "wt"
         wt.mkdir()
-        assert deps.run_dep_command(fake_config, "repo", wt,
-                                    "definitely-not-a-binary-xyz install") is False
+        assert "FileNotFoundError" in deps.run_dep_command(
+            fake_config, "repo", wt, "definitely-not-a-binary-xyz install")
 
 
 class TestInstallWorktreeDeps:
@@ -240,6 +240,29 @@ class TestInstallWorktreeDeps:
             deps.install_worktree_deps(fake_config, "repo", wt)
         assert [c.args[0] for c in emit.call_args_list] == ["worktree_dep_command_failed"]
 
+    def test_failed_command_logs_the_stderr_tail(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        cmd = "python3 -c \"import sys; sys.stderr.write('x' * 600 + 'schema is invalid'); sys.exit(3)\""
+        fake_config["workspace"]["dep_commands"] = [{"match": "repo", "cmd": cmd}]
+        with patch("core.deps.log.emit") as emit:
+            deps.install_worktree_deps(fake_config, "repo", wt)
+        reason = emit.call_args.kwargs["meta"]["reason"]
+        assert reason.startswith("rc=3: stderr: ") and reason.endswith("schema is invalid")
+        assert len(reason) == len("rc=3: stderr: ") + 500
+        assert reason in emit.call_args.args[1]
+
+    def test_failed_command_logs_the_stdout_tail_beside_stderr_warnings(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        cmd = ("python3 -c \"import sys; sys.stderr.write('WARN npmrc'); "
+               "print('ERR_PNPM_NO_OFFLINE_TARBALL'); sys.exit(1)\"")
+        fake_config["workspace"]["dep_commands"] = [{"match": "repo", "cmd": cmd}]
+        with patch("core.deps.log.emit") as emit:
+            deps.install_worktree_deps(fake_config, "repo", wt)
+        assert emit.call_args.kwargs["meta"]["reason"] == (
+            "rc=1: stderr: WARN npmrc | stdout: ERR_PNPM_NO_OFFLINE_TARBALL")
+
     def test_success_is_not_logged(self, fake_config, tmp_path):
         wt = tmp_path / "wt"
         wt.mkdir()
@@ -260,113 +283,6 @@ class TestInstallWorktreeDeps:
             deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
         assert [c.args[0] for c in run.call_args_list] == [
             ["pnpm", "install", "--ignore-scripts"]]
-
-
-class TestGenerateReviewPrisma:
-    def _entry(self):
-        return {"match": "repo", "cli": "/opt/prisma/build/index.js",
-                "schema": "app/prisma/schema.prisma", "output": "app/src/generated/prisma",
-                "options": {"moduleFormat": "cjs"}}
-
-    def _worktree(self, tmp_path):
-        wt = tmp_path / "wt"
-        (wt / "app" / "prisma").mkdir(parents=True)
-        (wt / "app" / "prisma" / "schema.prisma").write_text(
-            'generator client {\n  provider = "touch /tmp/pwned"\n}\n')
-        return wt
-
-    def _fake_generate(self, seen):
-        def run(argv, cwd, env, **kw):
-            stage = Path(cwd)
-            seen.update(argv=argv, env=env, cwd=cwd,
-                        schema=(stage / "schema.prisma").read_text(),
-                        config=(stage / "prisma.config.mjs").read_text())
-            (stage / "out").mkdir()
-            (stage / "out" / "client.ts").write_text("export {}\n")
-            return subprocess.CompletedProcess(argv, 0, "", "")
-        return run
-
-    def test_runs_only_the_frshty_generator_and_copies_its_output(self, fake_config, tmp_path):
-        wt = self._worktree(tmp_path)
-        fake_config["workspace"]["review_prisma"] = [self._entry()]
-        seen = {}
-        with patch("core.deps.subprocess.run", side_effect=self._fake_generate(seen)), \
-             patch("core.deps.log.emit") as emit:
-            deps.generate_review_prisma(fake_config, "repo", wt)
-        assert not emit.called
-        stage = Path(seen["cwd"])
-        assert seen["argv"] == [
-            "node", "/opt/prisma/build/index.js", "generate",
-            "--config", str(stage / "prisma.config.mjs"),
-            "--generator", deps.REVIEW_PRISMA_GENERATOR]
-        assert set(seen["env"]) == {"PATH", "HOME", "CHECKPOINT_DISABLE",
-                                    "PRISMA_HIDE_UPDATE_MESSAGE", "PRISMA_SCHEMA_ENGINE_BINARY"}
-        assert seen["env"]["HOME"] == str(stage)
-        assert not stage.is_relative_to(wt)
-        assert seen["schema"].endswith(
-            f"generator {deps.REVIEW_PRISMA_GENERATOR} {{\n"
-            f'  provider = "prisma-client"\n  output = "{stage / "out"}"\n'
-            f'  moduleFormat = "cjs"\n}}\n')
-        assert str(stage / "schema.prisma") in seen["config"]
-        assert (wt / "app" / "src" / "generated" / "prisma" / "client.ts").read_text() == "export {}\n"
-
-    def test_replaces_a_stale_output(self, fake_config, tmp_path):
-        wt = self._worktree(tmp_path)
-        stale = wt / "app" / "src" / "generated" / "prisma"
-        stale.mkdir(parents=True)
-        (stale / "old.ts").write_text("")
-        fake_config["workspace"]["review_prisma"] = [self._entry()]
-        with patch("core.deps.subprocess.run", side_effect=self._fake_generate({})):
-            deps.generate_review_prisma(fake_config, "repo", wt)
-        assert sorted(p.name for p in stale.iterdir()) == ["client.ts"]
-
-    def test_a_symlinked_output_is_refused(self, fake_config, tmp_path):
-        wt = self._worktree(tmp_path)
-        outside = tmp_path / "outside"
-        outside.mkdir()
-        (outside / "keep").write_text("")
-        (wt / "app" / "src").symlink_to(outside)
-        fake_config["workspace"]["review_prisma"] = [self._entry()]
-        with patch("core.deps.subprocess.run") as run, \
-             patch("core.deps.log.emit") as emit:
-            deps.generate_review_prisma(fake_config, "repo", wt)
-        assert not run.called
-        assert [c.args[0] for c in emit.call_args_list] == ["review_prisma_generate_failed"]
-        assert [p.name for p in outside.iterdir()] == ["keep"]
-
-    def test_a_symlinked_schema_is_refused(self, fake_config, tmp_path):
-        wt = self._worktree(tmp_path)
-        secret = tmp_path / "secret"
-        secret.write_text("token")
-        schema = wt / "app" / "prisma" / "schema.prisma"
-        schema.unlink()
-        schema.symlink_to(secret)
-        fake_config["workspace"]["review_prisma"] = [self._entry()]
-        with patch("core.deps.subprocess.run") as run, \
-             patch("core.deps.log.emit") as emit:
-            deps.generate_review_prisma(fake_config, "repo", wt)
-        assert not run.called
-        assert [c.args[0] for c in emit.call_args_list] == ["review_prisma_generate_failed"]
-
-    def test_a_failed_generate_is_logged_and_keeps_the_output(self, fake_config, tmp_path):
-        wt = self._worktree(tmp_path)
-        kept = wt / "app" / "src" / "generated" / "prisma"
-        kept.mkdir(parents=True)
-        (kept / "client.ts").write_text("old")
-        fake_config["workspace"]["review_prisma"] = [self._entry()]
-        failed = subprocess.CompletedProcess([], 1, "", "Validation Error Count: 1")
-        with patch("core.deps.subprocess.run", return_value=failed), \
-             patch("core.deps.log.emit") as emit:
-            deps.generate_review_prisma(fake_config, "repo", wt)
-        assert [c.args[0] for c in emit.call_args_list] == ["review_prisma_generate_failed"]
-        assert (kept / "client.ts").read_text() == "old"
-
-    def test_another_repo_runs_nothing(self, fake_config, tmp_path):
-        wt = self._worktree(tmp_path)
-        fake_config["workspace"]["review_prisma"] = [self._entry()]
-        with patch("core.deps.subprocess.run") as run:
-            deps.generate_review_prisma(fake_config, "other", wt)
-        assert not run.called
 
 
 class TestExportPnpmStore:

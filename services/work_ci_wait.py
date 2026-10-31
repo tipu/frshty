@@ -33,7 +33,7 @@ CI_WAIT_MAX_MINUTES = 120
 _REMOTE_SLUG = re.compile(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$")
 
 RESULT_PROMPT = (
-    "The board watched the checks of PR #{pr}. Result: {result}. "
+    work_store.BOARD_PROMPT_MARKER + " The board watched the checks of PR #{pr}. Result: {result}. "
     "Continue the task from here. To wait on checks again, end your turn "
     "with the line `waiting on PR #{pr} checks`."
 )

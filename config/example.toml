@@ -58,19 +58,19 @@ branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "your
 # environment. HOME stays, because pnpm keeps its pinned versions and metadata cache there, so HOME
 # must hold no .npmrc with a registry token. A PR that needs a package the shared store does not
 # hold gets no install, and the failure is logged as worktree_dep_command_failed.
+# Generate a Prisma client in a PR review worktree with a second review_dep_commands entry,
+# because --ignore-scripts skips the postinstall that runs prisma generate. --cli is a Prisma CLI
+# that the operator installs outside every worktree with scripts/install_review_prisma.sh <dir> <version>.
+# The script copies the PR schema to a scratch directory, appends its own prisma-client generator
+# with the --option values, and runs only that generator under a minimal environment with a
+# frshty config. No PR generator, prisma.config.ts or node_modules package runs, and the CLI
+# downloads no engine. It then replaces --output with the generated files. --schema and --output
+# are worktree-relative. Give the script an absolute path into frshty's own install and run it
+# with python3 -I, so the worktree supplies no code. A failure is logged as
+# worktree_dep_command_failed with the reason, and the review still runs.
 # review_dep_commands = [
 #     {match = "some-repo", cmd = "sh -c 'exec env -i PATH=\"$PATH\" HOME=\"$HOME\" npm_config_store_dir=\"$npm_config_store_dir\" pnpm install --frozen-lockfile --offline --ignore-scripts --ignore-pnpmfile'"},
-# ]
-# Generate a Prisma client in a PR review worktree after review_dep_commands, because
-# --ignore-scripts skips the postinstall that runs prisma generate. cli is a Prisma CLI that
-# the operator installs outside every worktree with scripts/install_review_prisma.sh <dir> <version>.
-# frshty copies the PR schema to a scratch directory, appends its own prisma-client generator
-# with the options below, and runs only that generator under env -i with a frshty config. No PR
-# generator, prisma.config.ts or node_modules package runs, and the CLI downloads no engine.
-# frshty then replaces output with the generated files. schema and output are worktree-relative.
-# A failure is logged as review_prisma_generate_failed and the review still runs.
-# review_prisma = [
-#     {match = "some-repo", cli = "/path/to/prisma-cli/node_modules/prisma/build/index.js", schema = "apps/app/prisma/schema.prisma", output = "apps/app/src/generated/prisma", options = {moduleFormat = "cjs"}},
+#     {match = "some-repo", cmd = "python3 -I /app/scripts/review_recipes/prisma_generate.py --cli /path/to/prisma-cli/node_modules/prisma/build/index.js --schema apps/app/prisma/schema.prisma --output apps/app/src/generated/prisma --option moduleFormat=cjs"},
 # ]
 # run_commands = ["cd django-app && pipenv run python manage.py runserver &", "cd frontend && npm start &"]
 

@@ -61,7 +61,10 @@ def load_config(path: str) -> dict:
     ws.setdefault("exclude", [])
     ws.setdefault("dep_commands", [])
     ws.setdefault("review_dep_commands", [])
-    ws.setdefault("review_prisma", [])
+    if "review_prisma" in ws:
+        raise ValueError(f"{path}: workspace.review_prisma was removed; generate the Prisma "
+                         "client with scripts/review_recipes/prisma_generate.py in "
+                         "workspace.review_dep_commands")
 
     raw["features"].setdefault("auto_review", True)
     raw["features"].setdefault("correspondence", True)

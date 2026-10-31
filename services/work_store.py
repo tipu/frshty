@@ -105,8 +105,9 @@ RUN_BUDGET_RULE = (
     "When the budget is spent the board stops continuing the run, so ship the "
     "part that works before then and file the rest as a follow-up. "
 )
+BOARD_PROMPT_MARKER = "[frshty board]"
 CHECK_IN_PROMPT = (
-    f"Check-in: this run has used {RUN_CHECK_IN_MINUTES} minutes. Nine runs in "
+    f"{BOARD_PROMPT_MARKER} Check-in: this run has used {RUN_CHECK_IN_MINUTES} minutes. Nine runs in "
     f"ten finish inside that time. The budget is {RUN_BUDGET_MINUTES // 60} "
     f"hours. Print one {PROGRESS_MARKER} line that names what is done, what "
     "remains, and how many more minutes you need. If the rest does not fit in "
@@ -114,7 +115,7 @@ CHECK_IN_PROMPT = (
     "follow-up. Then continue."
 )
 BG_WAIT_NUDGE_PROMPT = (
-    "The board has waited {minutes} minutes for your background task to "
+    BOARD_PROMPT_MARKER + " The board has waited {minutes} minutes for your background task to "
     "report, and no task notification arrived. Still pending: {tasks}. Check "
     "each one now. A wait loop that matches its own command line, or a task "
     "whose process is gone, never reports, so stop it and continue the task "
@@ -122,7 +123,7 @@ BG_WAIT_NUDGE_PROMPT = (
     "again and the board waits once more."
 )
 BUDGET_SPENT_PROMPT = (
-    f"The wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours for this run "
+    f"{BOARD_PROMPT_MARKER} The wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours for this run "
     "is spent. Do not start new work. Commit and push the part that works if "
     "its tests pass, file the rest as a follow-up, state a one-line checkpoint "
     "that names what remains, and end your turn. The board does not continue "
@@ -166,7 +167,7 @@ PLAIN_REPORT_RULE = (
     "follow. "
 )
 CONTINUE_PROMPT_TEMPLATE = (
-    "Continue toward the objective. {delivery}" + PROGRESS_RULE + RUN_BUDGET_RULE +
+    BOARD_PROMPT_MARKER + " Continue toward the objective. {delivery}" + PROGRESS_RULE + RUN_BUDGET_RULE +
     "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
     "keep going. Ask the operator only when you truly cannot decide — the "
@@ -1022,7 +1023,8 @@ def is_wakeup_prompt(prompt: str) -> bool:
     reach the session as a user prompt, so each one fires UserPromptSubmit
     exactly like a reply typed by the operator. None of them answers
     anything, so a question waiting on the board must survive them."""
-    return _WAKEUP_PROMPT_MARKER in (prompt or "")
+    return any(marker in (prompt or "")
+               for marker in (_WAKEUP_PROMPT_MARKER, BOARD_PROMPT_MARKER))
 
 
 def record_event(session_id: str, kind: str, payload: dict) -> bool:
