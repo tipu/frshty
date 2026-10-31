@@ -243,6 +243,13 @@
         <span class="text-xs px-3 py-1 rounded cursor-pointer ml-2" style="background:#3f1d1d;color:#fca5a5"
               @click="fuDismiss(f)">dismiss</span>
       </div>
+      <div class="mt-2">
+        <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#93c5fd"
+              title="break down in plain words why this follow-up exists and what it does"
+              @click="fuExplain(f)">{{ fuExplainBusy[f.id] ? "explaining…" : (fuExplainText[f.id] ? "hide explanation" : "explain") }}</span>
+      </div>
+      <div class="text-sm mt-2" v-if="fuExplainText[f.id]"
+           style="white-space:pre-wrap;background:#0b0b10;border:1px solid #2a2a35;border-radius:6px;padding:8px 12px">{{ fuExplainText[f.id] }}</div>
       <div class="text-xs text-gray-500 mt-1" v-if="f.detail">{{ f.detail }}</div>
       <div class="text-xs text-red-400 mt-1" v-if="fuError[f.id]">{{ fuError[f.id] }}</div>
     </div>
@@ -376,6 +383,7 @@ const app = frshtyApp({
                     systemPrompt: "", showPrompt: false, launchCommand: "",
                     btwText: "", btwError: "", btwBusy: false, debriefStatus: "",
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
+                    fuExplainText: {}, fuExplainBusy: {},
                     fuTray: {}, fupTray: PasteImages.tray(),
                     sourceItem: null, followupChildren: [], worktree: null, tickets: [],
                     session: null,
@@ -665,6 +673,21 @@ const app = frshtyApp({
         this.fupError = "launch failed: " + e.message;
       } finally {
         this.fupBusy = false;
+      }
+    },
+    async fuExplain(f) {
+      if (this.fuExplainBusy[f.id]) return;
+      if (this.fuExplainText[f.id]) { delete this.fuExplainText[f.id]; return; }
+      this.fuExplainBusy[f.id] = true; delete this.fuError[f.id];
+      try {
+        const r = await fetch(this.api(`/api/work/followups/${f.id}/explain`), { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) this.fuError[f.id] = d.error || ("explain failed HTTP " + r.status);
+        else this.fuExplainText[f.id] = d.text;
+      } catch (e) {
+        this.fuError[f.id] = "explain failed: " + e.message;
+      } finally {
+        delete this.fuExplainBusy[f.id];
       }
     },
     async fuDismiss(f) {
