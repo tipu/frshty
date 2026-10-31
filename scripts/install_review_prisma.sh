@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install a pinned Prisma CLI outside every worktree for workspace.review_prisma.
+# Install a pinned Prisma CLI outside every worktree for scripts/review_recipes/prisma_generate.py.
 # Usage: scripts/install_review_prisma.sh <dir> <version>
-# Prints the path to set as the entry's cli.
+# Prints the path to pass as --cli.
 set -euo pipefail
 dir=$1
 version=$2

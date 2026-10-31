@@ -64,6 +64,15 @@ class TestLoadConfig:
         config = load_config(str(config_file))
         assert config["_base_url"] == "http://localhost:9999"
 
+    def test_a_leftover_review_prisma_key_is_refused(self, tmp_path):
+        config_file = tmp_path / "config.toml"
+        config_file.write_text(
+            '[job]\nkey = "x"\nport = 9999\nplatform = "github"\n\n'
+            '[workspace]\nroot = "' + str(tmp_path) + '"\nreview_prisma = []\n'
+        )
+        with pytest.raises(ValueError, match="review_prisma was removed"):
+            load_config(str(config_file))
+
 
 class TestResolveEnv:
     def test_direct_value(self):
