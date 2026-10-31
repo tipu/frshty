@@ -2404,7 +2404,8 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the run passed its wall-clock budget of {RUN_BUDGET_MINUTES} "
                          "minutes; an operator reply or a reopen gives a new one", now)
             return "budget_spent"
-        over_budget = _budget_minutes(clock) >= RUN_BUDGET_MINUTES
+        minutes = _budget_minutes(c, run, clock)
+        over_budget = minutes >= RUN_BUDGET_MINUTES
         if not item["autocontinue"]:
             _record_stop(c, run, "disabled", "autocontinue is off for this item", now)
             return "disabled"
@@ -2418,7 +2419,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'budget_spent', ?, ?)",
                 (run["work_item_id"], run["id"],
-                 db.dump_json({"minutes": _budget_minutes(clock)}), now),
+                 db.dump_json({"minutes": minutes}), now),
             )
     sent = tmux_send(run["tmux_key"], BUDGET_SPENT_PROMPT if over_budget
                      else continue_prompt(contexts, run["work_item_id"]))
@@ -2817,9 +2818,55 @@ def _budget_event_since(c, run, kind: str, since: str) -> bool:
         (run["id"], kind, since)).fetchone() is not None
 
 
-def _budget_minutes(clock: str, now: datetime | None = None) -> int:
+_BUDGET_OPEN_KINDS = ("SessionStart", "UserPromptSubmit", "auto_continued", "ci_wait_done",
+                      "operator_reply", "operator_reopen", "run_resumed", "bg_wait_nudged")
+_BUDGET_CLOSE_KINDS = ("Stop", "Notification", "SessionEnd")
+
+
+def _budget_minutes(c, run, clock: str, now: datetime | None = None) -> int:
+    """The minutes the agent spent in its turns since the budget clock started.
+
+    A turn opens with SessionStart or UserPromptSubmit, or with an event the
+    board writes when it sends the agent back to work. It closes with Stop,
+    SessionEnd or the idle Notification, which Claude Code fires instead of
+    Stop when a turn dies on an API error. A codex agent reports no prompt,
+    and an answer typed in its terminal writes no event, so a Stop that
+    arrives with no turn open counts the time since the last close. The time
+    between a closed turn and the next one is a wait on CI, on a background
+    task or on the operator, and no agent works in it. Work item 328 ended a
+    turn on a background wait that never finished, sat 7.5 hours in
+    waiting_external, and on resume the board counted 562 minutes and stopped
+    a run whose turns had used 40. The clock itself opens a turn,
+    because a run starts working and a reply starts a new turn."""
     now_dt = now or datetime.now(timezone.utc)
-    return int((now_dt - datetime.fromisoformat(clock)).total_seconds() // 60)
+    kinds = _BUDGET_OPEN_KINDS + _BUDGET_CLOSE_KINDS
+    rows = c.execute(
+        "SELECT kind, payload, created_at FROM work_events WHERE work_run_id = ? "
+        f"AND created_at > ? AND kind IN ({', '.join('?' * len(kinds))}) ORDER BY id",
+        (run["id"], clock, *kinds)).fetchall()
+    opened: datetime | None = datetime.fromisoformat(clock)
+    closed = opened
+    seconds = 0.0
+    for row in rows:
+        at = datetime.fromisoformat(row["created_at"])
+        if row["kind"] == "Notification":
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except ValueError:
+                payload = {}
+            if not is_idle_stop(row["kind"], payload):
+                continue
+        if row["kind"] in _BUDGET_CLOSE_KINDS:
+            if opened is None and row["kind"] == "Stop":
+                opened = closed
+            if opened is not None:
+                seconds += max(0.0, (at - opened).total_seconds())
+            opened, closed = None, at
+        elif opened is None:
+            opened = at
+    if opened is not None:
+        seconds += max(0.0, (now_dt - opened).total_seconds())
+    return int(seconds // 60)
 
 
 def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
@@ -2851,7 +2898,7 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
             if not current or current["state"] != "agent_working":
                 continue
             clock = _budget_clock(c, run)
-            minutes = _budget_minutes(clock, now_dt)
+            minutes = _budget_minutes(c, run, clock, now_dt)
             if minutes >= RUN_BUDGET_MINUTES:
                 kind, prompt = "budget_spent", BUDGET_SPENT_PROMPT
             elif minutes >= RUN_CHECK_IN_MINUTES:
@@ -2899,12 +2946,12 @@ def sweep_background_waits(now: datetime | None = None) -> list[dict]:
     actions: list[dict] = []
     for run in rows:
         with db.tx() as c:
-            if _budget_minutes(_budget_clock(c, run), now_dt) >= RUN_BUDGET_MINUTES:
+            if _budget_minutes(c, run, _budget_clock(c, run), now_dt) >= RUN_BUDGET_MINUTES:
                 continue
         if not agent_running(run["tmux_key"], run["provider"]):
             continue
         tasks = sorted(pending_background_tasks(resolve_transcript_path(run)))
-        minutes = _budget_minutes(run["updated_at"], now_dt)
+        minutes = int((now_dt - datetime.fromisoformat(run["updated_at"])).total_seconds() // 60)
         current = db.query_one("SELECT state, snoozed_until FROM work_items WHERE id = ?",
                                (run["work_item_id"],))
         if not current or current["state"] != "waiting_external" \
