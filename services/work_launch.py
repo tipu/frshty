@@ -87,7 +87,8 @@ def proposal_policy() -> dict:
 
     mute_declined_proposals, default true: a proposal class the operator
     declined more than work_store.MUTE_DECLINED_SHARE of, over its last
-    work_store.MUTE_WINDOW proposals, is not filed any more."""
+    work_store.MUTE_WINDOW proposals, is not filed for work_store.MUTE_DAYS
+    after its newest decline."""
     work = _board_work()
     return {"client_pr_proposals": work.get("client_pr_proposals", False),
             "mute_declined_proposals": work.get("mute_declined_proposals", True)}
