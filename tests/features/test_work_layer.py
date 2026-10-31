@@ -272,7 +272,7 @@ class TestCheckpointCloses:
                        (pending_question, item_id))
         monkeypatch.setattr(work_store, "last_assistant_text", lambda p: tail)
         monkeypatch.setattr(work_store, "pending_background_tasks",
-                            lambda p: {"t1"} if bg else set())
+                            lambda p, since="": {"t1"} if bg else set())
         sent = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sent)
         return item_id, work_store.maybe_autocontinue(sid, "/tmp/t.jsonl"), sent
@@ -2235,6 +2235,60 @@ class TestBackgroundWait:
         work_store.record_event(f"sid-bgd-{item_id}", "Stop", {"transcript_path": path})
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "needs_you"
+
+    def _at(self, entry, when):
+        entry["timestamp"] = when.isoformat().replace("+00:00", "Z")
+        return entry
+
+    def test_tasks_started_before_since_are_not_pending(self, tmp_path):
+        now = datetime.now(timezone.utc)
+        path = self._transcript(tmp_path, [
+            self._at(self._bash_start("b881"), now - timedelta(hours=2)),
+            self._at(self._monitor_start("b882"), now)])
+        since = (now - timedelta(hours=1)).isoformat()
+        assert work_store.pending_background_tasks(path) == {"b881", "b882"}
+        assert work_store.pending_background_tasks(path, since) == {"b882"}
+
+    @pytest.mark.parametrize("age", [timedelta(seconds=10), timedelta(hours=2)])
+    def test_resume_drops_tasks_of_the_old_process(self, tmp_path, age):
+        old = datetime.now(timezone.utc) - age
+        path = self._transcript(tmp_path, [
+            self._at(self._bash_start("b883"), old),
+            self._checkpoint("Both PRs wait for a human review.")])
+        item_id = _mkitem("bg resumed item")
+        sid = f"sid-bgr-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "SessionStart", {"source": "resume"})
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert not item["stop_reason"].startswith("Waiting on a background task")
+
+    def test_task_launched_before_a_late_session_start_hook_stays_pending(self, tmp_path):
+        early = datetime.now(timezone.utc) - timedelta(seconds=3)
+        path = self._transcript(tmp_path, [
+            self._at(self._bash_start("b885"), early),
+            self._checkpoint("Checkpoint: waiting on CI.")])
+        item_id = _mkitem("bg late hook item")
+        sid = f"sid-bgl-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "SessionStart", {"source": "resume"})
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "waiting_external"
+
+    def test_compaction_keeps_tasks_of_the_same_process(self, tmp_path):
+        old = datetime.now(timezone.utc) - timedelta(hours=2)
+        path = self._transcript(tmp_path, [
+            self._at(self._bash_start("b884"), old),
+            self._checkpoint("Checkpoint: waiting on CI.")])
+        item_id = _mkitem("bg compacted item")
+        sid = f"sid-bgc-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "SessionStart", {"source": "compact"})
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "waiting_external"
 
     def test_pending_question_outranks_bg_wait(self, tmp_path):
         path = self._transcript(tmp_path, [
