@@ -435,6 +435,7 @@ class ProposalKeyHeld(Exception):
 DECLINE_HOLD_DAYS = 7
 MUTE_WINDOW = 20
 MUTE_DECLINED_SHARE = 0.8
+MUTE_DAYS = 7
 PROPOSAL_DECLINE_HELD_EVENT = "proposal_decline_held"
 PROPOSAL_CLIENT_PR_SKIPPED_EVENT = "proposal_client_pr_skipped"
 PROPOSAL_CLASS_MUTED_EVENT = "proposal_class_muted"
@@ -515,9 +516,13 @@ def _class_muted(c, klass: str, instance_key: str | None) -> dict | None:
     more than MUTE_DECLINED_SHARE of its last MUTE_WINDOW decided proposals on
     this instance, else None. A class with fewer than MUTE_WINDOW decided
     proposals is never muted. A proposal still waiting is not decided, and
-    one a newer debrief withdrew was never the operator's call."""
+    one a newer debrief withdrew was never the operator's call. The mute
+    lifts MUTE_DAYS after the newest decline: a muted class files nothing,
+    so its window never changes, and the next proposal it files after the
+    mute lifts is a fresh decision that renews or ends the mute."""
     rows = c.execute(
-        "SELECT id, state, stop_reason, objective FROM work_items WHERE scope='proposal'"
+        "SELECT id, state, stop_reason, objective, archived_at FROM work_items"
+        " WHERE scope='proposal'"
         " AND instance_key IS ? AND state != ? AND COALESCE(stop_reason, '') != ?"
         " ORDER BY id DESC",
         (instance_key, PROPOSED_STATE, SUPERSEDED_REASON))
@@ -533,7 +538,10 @@ def _class_muted(c, klass: str, instance_key: str | None) -> dict | None:
                 if r["state"] == CANCELED_STATE and r["stop_reason"] == DECLINED_REASON]
     if len(declined) <= MUTE_DECLINED_SHARE * MUTE_WINDOW:
         return None
-    newest = declined[0]
+    newest = max(declined, key=lambda r: r["archived_at"] or "")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=MUTE_DAYS)).isoformat()
+    if (newest["archived_at"] or "") < cutoff:
+        return None
     return {"id": newest["id"], "state": newest["state"], "stop_reason": newest["stop_reason"],
             "declined": len(declined)}
 
@@ -548,7 +556,8 @@ def _refuse_proposal(c, objective: str, instance_key: str | None, contexts: str,
     declined conversation by rules of its own passes decline_hold=False. A
     merge or review of a client pull request is not filed unless the board's
     [work] client_pr_proposals says so. A class the operator keeps declining
-    is muted unless [work] mute_declined_proposals is false. A class in
+    is muted for MUTE_DAYS after its newest decline unless [work]
+    mute_declined_proposals is false. A class in
     MUTE_EXEMPT_CLASSES is never muted: a declined follow-up mostly means the
     operator already answered, and a muted class gets no new decisions, so
     its mute never lifts. work_launch is imported here rather than at the top
