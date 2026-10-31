@@ -133,6 +133,9 @@ _PHASE_OWNED_EVENTS = frozenset({
     "ticket_prove_started", "ticket_pr_descriptions_generated",
     "ticket_acceptance_enriched", "ctp_fanout_complete", "ctp_complete",
     "schedule_pr_skipped", "ticket_bug_fix_started",
+    "ticket_review_complete", "ticket_flow_doc_complete",
+    "ticket_test_planning_complete", "ticket_test_writing_complete",
+    "ticket_prove_complete", "ticket_backfill_complete", "ticket_dev_complete",
 })
 
 _COMMENT_EVENTS = frozenset({

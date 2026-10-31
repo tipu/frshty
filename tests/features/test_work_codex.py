@@ -304,7 +304,8 @@ class TestCodexLaunch:
     def test_configured_projects_are_offered(self, monkeypatch, tmp_path):
         board = MagicMock()
         board.config = {"workspace": {"root": str(tmp_path / "board"), "repos": []},
-                        "work": {"projects": {"tool-a": str(tmp_path / "a"),
+                        "work": {"admin": True,
+                                 "projects": {"tool-a": str(tmp_path / "a"),
                                               "tool-b": "~/b"}}}
         monkeypatch.setattr(work_launch.runtime, "instances",
                             lambda: {work_launch.core_config.BOARD_INSTANCE_KEY: board})
@@ -317,6 +318,22 @@ class TestCodexLaunch:
         assert entries["tool-a"]["root"] == str(tmp_path / "a")
         assert entries["tool-b"]["root"] == str(tmp_path / "b")
         assert entries["tool-b"]["primary"] is True
+
+    def test_a_board_that_is_not_admin_offers_only_its_instances(self, monkeypatch, tmp_path):
+        board = MagicMock()
+        board.config = {"workspace": {"root": str(tmp_path / "board"), "repos": []},
+                        "work": {"projects": {"tool": str(tmp_path / "tool")}}}
+        monkeypatch.setattr(work_launch.runtime, "instances",
+                            lambda: {work_launch.core_config.BOARD_INSTANCE_KEY: board})
+        (tmp_path / "tool").mkdir()
+        assert work_launch.board_admin() is False
+        assert [e["key"] for e in work_launch.project_entries()] == [
+            work_launch.core_config.BOARD_INSTANCE_KEY]
+        board.config["work"]["admin"] = "true"
+        assert work_launch.board_admin() is False
+        board.config["work"]["admin"] = True
+        assert work_launch.board_admin() is True
+        assert "tool" in {e["key"] for e in work_launch.project_entries()}
 
     def test_no_project_is_offered_without_config(self, monkeypatch, tmp_path):
         monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
@@ -343,7 +360,8 @@ class TestCodexLaunch:
     def test_board_offers_every_project_the_server_lists(self, monkeypatch, tmp_path):
         board = MagicMock()
         board.config = {"workspace": {"root": str(tmp_path), "repos": []},
-                        "work": {"projects": {"tool": str(tmp_path / "tool")}}}
+                        "work": {"admin": True,
+                                 "projects": {"tool": str(tmp_path / "tool")}}}
         monkeypatch.setattr(work_launch.runtime, "instances",
                             lambda: {work_launch.core_config.BOARD_INSTANCE_KEY: board})
         (tmp_path / "tool").mkdir()

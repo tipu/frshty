@@ -194,6 +194,18 @@ class TestEmitSlackTick:
         emit = self._emit(_config(), marks, pending, 1000.0, ACTIVE)
         assert emit.call_count == 0
 
+    def test_each_listed_workspace_keeps_its_own_mark(self, tmp_path):
+        """One tick covers every workspace an instance lists, and each
+        workspace keeps its own mark, so growth in one is never hidden by
+        the mark of another."""
+        config = {"features": {"slack": True}, "job": {},
+                  "slack": {"workspaces": [{"workspace": "north"}, {"workspace": "south"}]}}
+        marks, pending = {"alpha:north": (7, 7)}, {}
+        emit = self._emit(config, marks, pending, 1000.0, ACTIVE)
+        assert emit.call_count == 1
+        assert set(marks) == {"alpha:north", "alpha:south"}
+        assert set(pending) == {"alpha:south"}
+
     def test_the_window_running_out_raises_slack_tick_and_clears(self):
         marks, pending = {"alpha": (7, 7)}, {"alpha": [1000.0]}
         emit = self._emit(_config(), marks, pending, 1000.0, ACTIVE)
