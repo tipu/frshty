@@ -86,7 +86,7 @@ def _fds(base: str) -> list[str]:
 
 def _maps(base: str) -> list[str]:
     out = []
-    with open(os.path.join(base, "maps")) as f:
+    with open(os.path.join(base, "maps"), errors="surrogateescape") as f:
         for line in f:
             parts = line.split(None, 5)
             if len(parts) == 6 and parts[5].startswith("/"):
@@ -103,7 +103,7 @@ def _locked_by_live_pid(run: str) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except ProcessLookupError:
+    except (ProcessLookupError, OverflowError):
         return False
     except PermissionError:
         return True
@@ -124,7 +124,7 @@ def _candidates(root: str, cutoff: float) -> list[str]:
         return out
     for entry in entries:
         if EXTRACTED_SO.match(entry.name) and entry.is_file(follow_symlinks=False):
-            if entry.stat(follow_symlinks=False).st_mtime < cutoff:
+            if _mtime(entry) < cutoff:
                 out.append(entry.path)
         elif PYTEST_ROOT.match(entry.name) and entry.is_dir(follow_symlinks=False):
             current = os.path.realpath(os.path.join(entry.path, "pytest-current"))
@@ -137,9 +137,18 @@ def _candidates(root: str, cutoff: float) -> list[str]:
                     continue
                 if os.path.realpath(run.path) == current or _locked_by_live_pid(run.path):
                     continue
-                if run.stat(follow_symlinks=False).st_mtime < cutoff:
+                if _mtime(run) < cutoff:
                     out.append(run.path)
     return sorted(out)
+
+
+def _mtime(entry: os.DirEntry) -> float:
+    """inf for an entry that a concurrent pytest session removed after the
+    scandir, so it is never a candidate."""
+    try:
+        return entry.stat(follow_symlinks=False).st_mtime
+    except FileNotFoundError:
+        return float("inf")
 
 
 def sweep(config: dict, now: float | None = None, force: bool = False,
