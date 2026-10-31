@@ -70,6 +70,8 @@ def _wanted_entries(event: str, command: str) -> list[dict]:
             {"matcher": "Grep",
              "hooks": [{"type": "command", "command": command,
                         "timeout": LSP_GATE_TIMEOUT}]},
+            {"matcher": "Monitor",
+             "hooks": [{"type": "command", "command": command, "timeout": 10}]},
             {"matcher": WRITE_GATE_MATCHER,
              "hooks": [{"type": "command", "command": command,
                         "timeout": WRITE_GATE_TIMEOUT}]},
