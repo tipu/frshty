@@ -199,7 +199,17 @@ def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> st
         return f"{type(e).__name__}: {e}"
     if result.returncode == 0:
         return None
-    return f"rc={result.returncode}: {(result.stderr or result.stdout or '').strip()[-500:]}"
+    return failure_reason(result)
+
+
+def failure_reason(result: subprocess.CompletedProcess) -> str:
+    """`rc=<code>: ` and the last 500 characters of stderr and of stdout.
+    pnpm writes its ERR_PNPM line to stdout and only warnings to stderr, so
+    stderr alone can hold no reason at all."""
+    tails = [f"{name}: {text.strip()[-500:]}"
+             for name, text in (("stderr", result.stderr), ("stdout", result.stdout))
+             if text and text.strip()]
+    return f"rc={result.returncode}: " + " | ".join(tails)
 
 
 def install_worktree_deps(config: dict, repo_name: str, wt_path: Path,
