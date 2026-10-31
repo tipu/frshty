@@ -248,6 +248,39 @@ class TestMutedClass:
             _file(f"Doctor the queue, waiting {i}", contexts="saidanlabs,followup")
         assert _file(self.NEXT, contexts="saidanlabs,followup")
 
+    @staticmethod
+    def _age_declines(days):
+        at = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        db.execute("UPDATE work_items SET archived_at = ? WHERE stop_reason = ?",
+                   (at, work_store.DECLINED_REASON))
+
+    def test_the_mute_lifts_after_mute_days(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS + 1)
+        assert _file(self.NEXT, contexts="saidanlabs,followup")
+
+    def test_the_mute_holds_within_mute_days(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS - 1)
+        with pytest.raises(work_store.ProposalSuppressed) as raised:
+            _file(self.NEXT, contexts="saidanlabs,followup")
+        assert raised.value.event == work_store.PROPOSAL_CLASS_MUTED_EVENT
+
+    def test_a_decline_after_the_mute_lifts_renews_it(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS + 1)
+        work_store.apply_action(_file(self.NEXT, contexts="saidanlabs,followup"), "decline")
+        with pytest.raises(work_store.ProposalSuppressed):
+            _file("Doctor the queue, after the lift", contexts="saidanlabs,followup")
+
+    def test_the_latest_decline_holds_the_mute_not_the_newest_proposal(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS + 1)
+        older = db.query_all("SELECT id FROM work_items ORDER BY id")[0]["id"]
+        _age_decline(older, 0)
+        with pytest.raises(work_store.ProposalSuppressed):
+            _file(self.NEXT, contexts="saidanlabs,followup")
+
     def test_the_board_can_turn_the_mute_off(self, monkeypatch):
         self._history(declined=20)
         monkeypatch.setattr(work_launch, "_board_work",
