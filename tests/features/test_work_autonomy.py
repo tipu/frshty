@@ -551,7 +551,7 @@ class TestStopDetector:
         transcript.write_text("")
         import services.work_store as ws
         original = ws.pending_background_tasks
-        ws.pending_background_tasks = lambda path: True
+        ws.pending_background_tasks = lambda path, since="": True
         try:
             outcome = work_store.maybe_autocontinue(
                 sid, str(transcript), tail="The background task notifies me when it finishes.")
