@@ -522,7 +522,7 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
     terminal.kill_terminal(session_id)
     terminal.launch_pane_command(
         session_id, cwd,
-        f"{terminal.claude_cmd(_config)} --append-system-prompt {shlex.quote(context)}")
+        f"{terminal.claude_cmd(_config, cwd=cwd)} --append-system-prompt {shlex.quote(context)}")
 
     return {"session_id": session_id}
 
