@@ -170,7 +170,9 @@ def _restore_session_db(_isolated_db):
     sys.modules with their own _DB_PATH pointing at a deleted tmp file, and
     subsequent tests that `from features import tickets` get those stale
     modules. Before every test, restore the originals so the session DB is
-    the single source of truth."""
+    the single source of truth. After every test, point the path back at the
+    session DB again: a test that calls `db.init(tmp_path/...)` would
+    otherwise leave it on a file that pytest deletes once the test passes."""
     sys.modules["core.db"] = db
     sys.modules["core.state"] = state
     sys.modules["core.log"] = log
@@ -190,6 +192,8 @@ def _restore_session_db(_isolated_db):
     # hardening tests patch attributes via `features.tickets.state`).
     _reinject_core_modules()
     yield
+    db._DB_PATH = _SESSION_DB_PATH
+    db._MIGRATIONS_DIR = _SESSION_MIGRATIONS_DIR
 
 
 @pytest.fixture()
