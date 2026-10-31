@@ -221,6 +221,53 @@ def _is_work_run(session_id: str) -> tuple[bool, bool]:
     return bool(row), True
 
 
+def _holds_permission(session_id: str) -> bool:
+    """Whether this run's item holds a permission question, read within the
+    same short timeout as _is_work_run."""
+    try:
+        probe = sqlite3.connect(DB_PATH, timeout=0.25)
+    except Exception:
+        return False
+    try:
+        probe.execute("PRAGMA busy_timeout = 250")
+        row = probe.execute(
+            "SELECT i.pending_question FROM work_runs r JOIN work_items i "
+            "ON i.id = r.work_item_id WHERE r.session_id = ?", (session_id,)
+        ).fetchone()
+    except Exception:
+        return False
+    finally:
+        probe.close()
+    return bool(row) and '"permission": true' in (row[0] or "")
+
+
+def _clear_closed_permission_detached(session_id: str) -> None:
+    """Clear a closed permission dialog's question in a child process.
+
+    The clear waits on the database write lock and on tmux. A gate hook that
+    waits past its timeout is killed with no decision, and the tool runs, so
+    the gates must never wait on the clear."""
+    if not _holds_permission(session_id):
+        return
+    try:
+        if os.fork():
+            return
+    except OSError as e:
+        print(f"work hook: could not fork the permission clear: {e}",
+              file=sys.stderr, flush=True)
+        return
+    try:
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+        _bind_db().clear_closed_permission(session_id)
+    except BaseException as e:
+        _report_hook_error(session_id, e)
+    finally:
+        os._exit(0)
+
+
 def _correspondence_deny(tool: str, tool_input: dict) -> str:
     """The deny reason when this instance forbids a task to message a person.
 
@@ -361,6 +408,7 @@ def main() -> int:
                     }))
             return 0
         if kind == "PreToolUse":
+            _clear_closed_permission_detached(session_id)
             tool = data.get("tool_name") or ""
             reason = _correspondence_deny(tool, data.get("tool_input") or {})
             if reason:
