@@ -173,10 +173,10 @@ class TestRecheckBeforeSend:
         _expire(item_id)
         real = work_store.pending_background_tasks
 
-        def woke_meanwhile(path):
+        def woke_meanwhile(path, since=""):
             db.execute("UPDATE work_items SET state = 'needs_you', pending_question = 'q' "
                        "WHERE id = ?", (item_id,))
-            return real(path)
+            return real(path, since)
 
         monkeypatch.setattr(work_store, "pending_background_tasks", woke_meanwhile)
         assert _sweep(item_id) == []

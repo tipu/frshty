@@ -30,6 +30,7 @@ RUN_BUDGET_MINUTES = 240
 BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
 BG_WAIT_RECHECK_MINUTES = 30
 BG_WAIT_REASON = "Waiting on a background task"
+PROCESS_START_SLACK = timedelta(seconds=5)
 CI_WAIT_RECHECK_HOURS = 6
 CI_WAIT_RE = re.compile(r"\bwaiting on PR #(\d+) checks\b", re.IGNORECASE)
 PROPOSED_STATE = "proposed"
@@ -274,9 +275,43 @@ def _bg_scan_result_text(text: str, started: set[str], ended: set[str]) -> None:
             ended.add(m.group(1))
 
 
-def pending_background_tasks(transcript_path: str) -> set[str]:
+def agent_process_started_at(session_id: str) -> str:
+    """When the agent process behind this session last started.
+
+    A background task belongs to the process that launched it. A resume
+    starts a new process, and the tasks of the old one die without a
+    completion notification in the transcript. The SessionStart hook runs
+    async with a 5 s timeout (scripts/install_work_hooks.py), so its event
+    trails the process start by at most that long; the returned time is moved
+    back by PROCESS_START_SLACK, the same 5 s, so a task the new process
+    launched in that window still counts."""
+    row = db.query_one(
+        "SELECT MAX(e.created_at) AS at FROM work_events e "
+        "JOIN work_runs r ON r.id = e.work_run_id "
+        "WHERE r.session_id = ? AND e.kind = 'SessionStart' "
+        "AND json_extract(e.payload, '$.source') IN ('startup', 'resume')",
+        (session_id,))
+    if not row or not row["at"]:
+        return ""
+    return (datetime.fromisoformat(row["at"]) - PROCESS_START_SLACK).isoformat()
+
+
+def _before(stamp, since: datetime | None) -> bool:
+    if since is None or not isinstance(stamp, str):
+        return False
+    try:
+        at = datetime.fromisoformat(stamp)
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at < since
+
+
+def pending_background_tasks(transcript_path: str, since: str = "") -> set[str]:
     if not transcript_path or not os.path.isfile(transcript_path):
         return set()
+    since_dt = datetime.fromisoformat(since) if since else None
     started: set[str] = set()
     ended: set[str] = set()
     try:
@@ -288,7 +323,7 @@ def pending_background_tasks(transcript_path: str) -> set[str]:
                     d = json.loads(line)
                 except ValueError:
                     continue
-                if d.get("isSidechain"):
+                if d.get("isSidechain") or _before(d.get("timestamp"), since_dt):
                     continue
                 if isinstance(d.get("content"), str):
                     _bg_scan_result_text(d["content"], started, ended)
@@ -1042,7 +1077,8 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
         finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
         if not finished and not _blocked_on_operator(tail):
-            bg_pending = bool(pending_background_tasks(transcript_path))
+            bg_pending = bool(pending_background_tasks(
+                transcript_path, agent_process_started_at(session_id)))
             ci_waiting = bool(CI_WAIT_RE.search(tail))
     permission = ""
     permission_closed = False
@@ -2308,7 +2344,8 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
     # transaction, because it opens a file, and it is skipped for a turn that
     # is finished or is waiting on the operator, which are decided first.
     bg_pending = (not finished and not _blocked_on_operator(tail)
-                  and bool(pending_background_tasks(transcript_path)))
+                  and bool(pending_background_tasks(
+                      transcript_path, agent_process_started_at(session_id))))
     finished = finished or (by_checkpoint and not bg_pending)
     now = _now()
     with db.tx() as c:
@@ -2952,7 +2989,8 @@ def sweep_background_waits(now: datetime | None = None) -> list[dict]:
                 continue
         if not agent_running(run["tmux_key"], run["provider"]):
             continue
-        tasks = sorted(pending_background_tasks(resolve_transcript_path(run)))
+        tasks = sorted(pending_background_tasks(
+            resolve_transcript_path(run), agent_process_started_at(run["session_id"])))
         minutes = int((now_dt - datetime.fromisoformat(run["updated_at"])).total_seconds() // 60)
         current = db.query_one("SELECT state, snoozed_until FROM work_items WHERE id = ?",
                                (run["work_item_id"],))
