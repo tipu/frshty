@@ -27,6 +27,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import time
 from pathlib import Path
 
@@ -36,6 +37,7 @@ import core.state as state
 
 TMP_DIR = "/tmp"
 STALE_S = 6 * 3600
+LOCK_TIMEOUT_S = 3 * 86400
 SWEEP_INTERVAL_S = 3600
 STAMP = ".tmp-gc-stamp"
 PYTEST_ROOT = re.compile(r"^pytest-of-[^/]+$")
@@ -94,13 +96,24 @@ def _maps(base: str) -> list[str]:
     return out
 
 
-def _locked_by_live_pid(run: str) -> bool:
+def _locked_by_live_pid(run: str, now: float) -> bool:
     """pytest writes its pid into <run>/.lock while the session runs and
-    removes the file when the session ends."""
+    removes the file when the session ends. Like pytest, it treats a lock
+    older than LOCK_TIMEOUT_S as dead. It reads only a regular file, without
+    following a symlink, and at most 32 bytes of it."""
     try:
-        pid = int(Path(run, ".lock").read_text().strip())
+        fd = os.open(os.path.join(run, ".lock"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_mtime < now - LOCK_TIMEOUT_S:
+            return False
+        pid = int(os.read(fd, 32).strip())
     except (OSError, ValueError):
         return False
+    finally:
+        os.close(fd)
     try:
         os.kill(pid, 0)
     except (ProcessLookupError, OverflowError):
@@ -115,7 +128,7 @@ def _in_use(path: str, live: set[str]) -> bool:
     return any(p == path or p.startswith(prefix) for p in live)
 
 
-def _candidates(root: str, cutoff: float) -> list[str]:
+def _candidates(root: str, cutoff: float, now: float) -> list[str]:
     """The stale pytest runs and extracted libraries directly under root."""
     out: list[str] = []
     try:
@@ -135,7 +148,7 @@ def _candidates(root: str, cutoff: float) -> list[str]:
             for run in runs:
                 if not (PYTEST_RUN.match(run.name) and run.is_dir(follow_symlinks=False)):
                     continue
-                if os.path.realpath(run.path) == current or _locked_by_live_pid(run.path):
+                if os.path.realpath(run.path) == current or _locked_by_live_pid(run.path, now):
                     continue
                 if _mtime(run) < cutoff:
                     out.append(run.path)
@@ -167,7 +180,7 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
     if not (force or dry_run):
         state_dir.mkdir(parents=True, exist_ok=True)
         stamp.touch()
-    candidates = _candidates(root, now - STALE_S)
+    candidates = _candidates(root, now - STALE_S, now)
     removed: list[str] = []
     kept: dict[str, str] = {}
     freed = 0

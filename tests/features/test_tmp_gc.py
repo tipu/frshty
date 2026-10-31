@@ -123,3 +123,20 @@ def test_reads_maps_with_a_non_utf8_path(tmp_path):
     result = tmp_gc.sweep(config, force=True, root=str(root), proc=str(proc))
     assert str(root / SO) in result["kept"]
     assert str(root / "pytest-of-claude" / "pytest-1") in result["removed"]
+
+
+def test_ignores_a_lock_that_is_old_a_symlink_or_a_fifo(tmp_path):
+    root, proc, config = _tree(tmp_path)
+    runs = root / "pytest-of-claude"
+    (runs / "pytest-1" / ".lock").write_text(str(os.getpid()))
+    _age(runs / "pytest-1" / ".lock", time.time() - tmp_gc.LOCK_TIMEOUT_S - 60)
+    os.symlink("/dev/zero", runs / "pytest-2" / ".lock")
+    for run in ("pytest-1", "pytest-2"):
+        _age(runs / run)
+    fifo_run = runs / "pytest-5"
+    fifo_run.mkdir()
+    os.mkfifo(fifo_run / ".lock")
+    _age(fifo_run)
+    result = tmp_gc.sweep(config, force=True, root=str(root), proc=str(proc))
+    for run in ("pytest-1", "pytest-2", "pytest-5"):
+        assert str(runs / run) in result["removed"]
