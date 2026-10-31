@@ -28,7 +28,8 @@ MISSED_DECISION_AFTER_MINUTES = 3
 RUN_CHECK_IN_MINUTES = 73
 RUN_BUDGET_MINUTES = 240
 BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
-BG_WAIT_RECHECK_HOURS = 2
+BG_WAIT_RECHECK_MINUTES = 30
+BG_WAIT_REASON = "Waiting on a background task"
 CI_WAIT_RECHECK_HOURS = 6
 CI_WAIT_RE = re.compile(r"\bwaiting on PR #(\d+) checks\b", re.IGNORECASE)
 PROPOSED_STATE = "proposed"
@@ -111,6 +112,14 @@ CHECK_IN_PROMPT = (
     "remains, and how many more minutes you need. If the rest does not fit in "
     "the budget, cut scope: ship the part that works and file the rest as a "
     "follow-up. Then continue."
+)
+BG_WAIT_NUDGE_PROMPT = (
+    "The board has waited {minutes} minutes for your background task to "
+    "report, and no task notification arrived. Still pending: {tasks}. Check "
+    "each one now. A wait loop that matches its own command line, or a task "
+    "whose process is gone, never reports, so stop it and continue the task "
+    "from what you have. If a task still does useful work, end your turn "
+    "again and the board waits once more."
 )
 BUDGET_SPENT_PROMPT = (
     f"The wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours for this run "
@@ -1093,9 +1102,9 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                 elif bg_pending and not pending:
                     item_state = "waiting_external"
                     snooze = (datetime.now(timezone.utc)
-                              + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat()
-                    reason = f"Waiting on a background task: {excerpt[:300]}" if excerpt \
-                        else "Waiting on a background task"
+                              + timedelta(minutes=BG_WAIT_RECHECK_MINUTES)).isoformat()
+                    reason = f"{BG_WAIT_REASON}: {excerpt[:300]}" if excerpt \
+                        else BG_WAIT_REASON
             if kind == "UserPromptSubmit":
                 if item["pending_question"] and is_wakeup_prompt(payload.get("prompt") or ""):
                     c.execute("UPDATE work_items SET updated_at = ? WHERE id = ?",
@@ -2383,9 +2392,9 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, "
                 "stop_reason = ?, updated_at = ? WHERE id = ?",
                 ((datetime.now(timezone.utc)
-                  + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat(),
-                 f"Waiting on a background task: {excerpt}" if excerpt
-                 else "Waiting on a background task", now, run["work_item_id"]),
+                  + timedelta(minutes=BG_WAIT_RECHECK_MINUTES)).isoformat(),
+                 f"{BG_WAIT_REASON}: {excerpt}" if excerpt
+                 else BG_WAIT_REASON, now, run["work_item_id"]),
             )
             _record_stop(c, run, "waiting_external", "a background task is still running", now)
             return "waiting_external"
@@ -2640,7 +2649,10 @@ def retry_missed_autocontinues(cutoff: str) -> list[dict]:
         "AND (SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
         f"AND e.kind IN ({_IDLE_STOP_KINDS_SQL})) > "
         "(SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
-        f"AND e.kind IN ({_DECIDED_KINDS_SQL}))",
+        f"AND (e.kind IN ({_DECIDED_KINDS_SQL}) OR (e.kind = 'autocontinue_stopped' "
+        "AND json_extract(e.payload, '$.outcome') = 'budget_spent' "
+        "AND e.id > (SELECT COALESCE(MAX(b.id), 0) FROM work_events b "
+        f"WHERE b.work_item_id = i.id AND b.kind IN {_BUDGET_RESET_KINDS_SQL}))))",
         (cutoff,),
     )
     actions: list[dict] = []
@@ -2894,6 +2906,64 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
                 (run["work_item_id"], run["id"], kind,
                  db.dump_json({"minutes": minutes}), stamp))
         actions.append({"id": run["work_item_id"], "action": kind, "minutes": minutes})
+    return actions
+
+
+def sweep_background_waits(now: datetime | None = None) -> list[dict]:
+    """Wake an agent whose wait on a background task outlived its snooze.
+
+    A turn that ends on a background task parks the item in waiting_external
+    until the task notification wakes the agent. A task that never reports
+    held the item there for good: on 2026-10-31 a deepseek wait loop matched
+    its own pgrep and kept work 328 idle for seven and a half hours, and the
+    board showed the expired snooze to the operator as needs_you with nothing
+    to answer. This asks the agent to check its pending tasks instead. A run
+    past its wall-clock budget, or one whose agent process is gone, is left
+    for the operator. The event is written after the send, so a send that
+    fails is tried again on the next scan."""
+    now_dt = now or datetime.now(timezone.utc)
+    rows = db.query_all(
+        "SELECT i.id AS work_item_id, i.updated_at, r.id, r.session_id, r.tmux_key, "
+        "r.provider, r.started_at, r.transcript_path, r.cwd, r.agent_session_id "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'waiting_external' AND i.snoozed_until IS NOT NULL "
+        "AND i.snoozed_until <= ? AND i.stop_reason LIKE ?",
+        (now_dt.isoformat(), BG_WAIT_REASON + "%"))
+    actions: list[dict] = []
+    for run in rows:
+        with db.tx() as c:
+            if _budget_minutes(_budget_clock(c, run), now_dt) >= RUN_BUDGET_MINUTES:
+                continue
+        if not agent_running(run["tmux_key"], run["provider"]):
+            continue
+        tasks = sorted(pending_background_tasks(resolve_transcript_path(run)))
+        minutes = _budget_minutes(run["updated_at"], now_dt)
+        current = db.query_one("SELECT state, snoozed_until FROM work_items WHERE id = ?",
+                               (run["work_item_id"],))
+        if not current or current["state"] != "waiting_external" \
+                or not current["snoozed_until"] or current["snoozed_until"] > now_dt.isoformat():
+            continue
+        if not tmux_send(run["tmux_key"], BG_WAIT_NUDGE_PROMPT.format(
+                minutes=minutes, tasks=", ".join(tasks) or "none found in the transcript")):
+            log.emit("work_bg_wait_send_failed",
+                     f"work item {run['work_item_id']}: the background-wait check did not "
+                     "reach the agent pane; the next scan tries again")
+            continue
+        stamp = _now()
+        with db.tx() as c:
+            resumed = c.execute(
+                "UPDATE work_items SET state = 'agent_working', snoozed_until = NULL, "
+                "stop_reason = '', updated_at = ? WHERE id = ? AND state = 'waiting_external'",
+                (stamp, run["work_item_id"])).rowcount
+            if resumed:
+                c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'bg_wait_nudged', ?, ?)",
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"minutes": minutes, "tasks": tasks}), stamp))
+        actions.append({"id": run["work_item_id"], "minutes": minutes, "tasks": tasks})
     return actions
 
 
