@@ -22,6 +22,7 @@ import core.lsp_gate as lsp_gate
 import core.log as log
 import core.state as _state
 from core.job_logs import active_live_log_path, active_live_pid_path
+from core.paths import review_checkout
 from core.state import _instance_key_cv
 
 
@@ -462,6 +463,37 @@ LSP_RULE = (
 )
 
 
+REVIEW_TSSERVER = "/usr/lib/node_modules/typescript/lib/tsserver.js"
+REVIEW_TS_PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins" / "review-typescript-lsp"
+MARKETPLACE_TS_PLUGIN = "typescript-lsp@claude-plugins-official"
+
+
+def review_checkout_args(cwd) -> list[str]:
+    """The flags a Claude run needs when its working directory is a pull
+    request checkout, [] for any other directory.
+
+    Claude Code reads .claude/settings.json and .claude/settings.local.json
+    of its working directory, and a hook there runs a command at session
+    start whatever the permission mode and the tool list say.
+    `--setting-sources user` loads the user settings only.
+
+    typescript-language-server runs the tsserver of the workspace when it
+    finds node_modules/typescript/lib or .yarn/sdks/typescript/lib there, and
+    that tsserver loads the tsconfig plugins of the workspace. The marketplace
+    typescript plugin is turned off and plugins/review-typescript-lsp, which
+    pins tsserver.path to the global install, takes its place. The server
+    falls back to the workspace tsserver when the pinned path does not exist,
+    so without the global install the session runs with no TypeScript server
+    at all."""
+    if not cwd or not review_checkout(cwd):
+        return []
+    args = ["--setting-sources", "user",
+            "--settings", json.dumps({"enabledPlugins": {MARKETPLACE_TS_PLUGIN: False}})]
+    if os.path.isfile(REVIEW_TSSERVER):
+        args += ["--plugin-dir", str(REVIEW_TS_PLUGIN_DIR)]
+    return args
+
+
 def _denied_tools_args(denied_tools: tuple[str, ...] | list[str] | None) -> list[str]:
     """A `claude -p` run keeps its process alive until a scheduled wakeup
     fires, so every headless run denies HEADLESS_DENIED_TOOLS on top of the
@@ -526,6 +558,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--dangerously-skip-permissions"]
         cmd += _denied_tools_args(denied_tools)
         cmd += ["--append-system-prompt", LSP_RULE]
+        cmd += review_checkout_args(cwd)
         inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
@@ -726,6 +759,7 @@ class ClaudeProvider(LLMProvider):
                     "--append-system-prompt", LSP_RULE]
             if tools:
                 cmd += ["--allowedTools", ",".join(tools)]
+            cmd += review_checkout_args(cwd)
         cmd += _denied_tools_args(None)
         text, _ = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                   model=chosen_model, cwd=cwd, tools=tools,
@@ -755,6 +789,7 @@ class ClaudeProvider(LLMProvider):
         cmd += _denied_tools_args(denied_tools)
         for extra in add_dirs or []:
             cmd += ["--add-dir", str(extra)]
+        cmd += review_checkout_args(cwd)
         text, usage = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                       model=chosen_model, cwd=cwd, tools=tools,
                                       timeout=timeout, label="Claude agent", schema=schema)
