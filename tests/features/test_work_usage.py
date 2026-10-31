@@ -75,7 +75,7 @@ class TestTranscriptUsage:
 
 
 class TestSweepUsage:
-    def test_task_run_appears_on_the_invocation_log(self, tmp_path):
+    def test_task_run_appears_on_the_invocation_log(self, tmp_path, fresh_db):
         item_id = work_store.create_item("make usage visible")
         run_id = work_store.add_run(item_id, f"sid-usage-{item_id}", f"work-{item_id}", str(tmp_path))
         path = _claude_transcript(tmp_path)
@@ -94,7 +94,7 @@ class TestSweepUsage:
         assert row["cache_read_input_tokens"] == 3070
         assert row["cost_usd"] == 0.002012
 
-    def test_sweep_skips_an_unchanged_run_and_rereads_a_grown_one(self, tmp_path):
+    def test_sweep_skips_an_unchanged_run_and_rereads_a_grown_one(self, tmp_path, fresh_db):
         item_id = work_store.create_item("grow")
         run_id = work_store.add_run(item_id, f"sid-grow-{item_id}", f"work-{item_id}", str(tmp_path))
         path = _claude_transcript(tmp_path)
@@ -113,7 +113,7 @@ class TestSweepUsage:
         work_store.sweep_usage()
         assert _row(run_id)["output_tokens"] == 135
 
-    def test_status_change_alone_updates_the_row(self, tmp_path):
+    def test_status_change_alone_updates_the_row(self, tmp_path, fresh_db):
         item_id = work_store.create_item("finish")
         run_id = work_store.add_run(item_id, f"sid-fin-{item_id}", f"work-{item_id}", str(tmp_path))
         path = _claude_transcript(tmp_path)
@@ -154,7 +154,7 @@ class TestMessageCost:
 
 
 class TestSweepCost:
-    def test_sweep_fills_the_cost_of_an_unchanged_run(self, tmp_path):
+    def test_sweep_fills_the_cost_of_an_unchanged_run(self, tmp_path, fresh_db):
         item_id = work_store.create_item("backfill cost")
         run_id = work_store.add_run(item_id, f"sid-cost-{item_id}", f"work-{item_id}", str(tmp_path))
         path = _claude_transcript(tmp_path)
