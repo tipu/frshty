@@ -803,7 +803,7 @@ class TestPersonalConfig:
         reg = instances.add(config)
         jobs = _cron_routes({"instance_key": "personal"}, {"personal": reg})
         tasks = {j["task"] for j in jobs}
-        assert tasks == {"scheduler_check", "dep_store_gc"}, tasks
+        assert tasks == {"scheduler_check", "dep_store_gc", "tmp_gc"}, tasks
 
     def test_no_port_or_host_collision(self):
         import pathlib
