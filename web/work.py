@@ -661,7 +661,7 @@ def api_artifact_claude_start(artifact_id: int):
         try:
             terminal.launch_pane_command(
                 key, os.path.dirname(real),
-                f"{terminal.claude_cmd(config)} --append-system-prompt "
+                f"{terminal.claude_cmd(config, cwd=os.path.dirname(real))} --append-system-prompt "
                 f"\"$(cat {shlex.quote(ctx_path)})\"")
         except RuntimeError as e:
             log.emit("work_artifact_claude_failed",
