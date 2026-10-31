@@ -49,6 +49,13 @@ branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "your
 # dep_commands = [
 #     {match = "some-repo", cmd = "pipenv install --dev"},
 # ]
+# Run in a PR review worktree after each fetch, before the review session starts.
+# The command runs the PR's own config, so it must not run the PR's code or reach the network:
+# --ignore-scripts skips install scripts, --ignore-pnpmfile skips .pnpmfile hooks, --offline
+# installs only from the shared store, and env -u keeps tokens out of the PR's .npmrc.
+# review_dep_commands = [
+#     {match = "some-repo", cmd = "env -u GH_TOKEN -u GITHUB_TOKEN -u NODE_AUTH_TOKEN pnpm install --frozen-lockfile --offline --ignore-scripts --ignore-pnpmfile"},
+# ]
 # run_commands = ["cd django-app && pipenv run python manage.py runserver &", "cd frontend && npm start &"]
 
 [pr]

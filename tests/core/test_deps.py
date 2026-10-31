@@ -216,6 +216,50 @@ class TestRunDepCommand:
                                     "definitely-not-a-binary-xyz install") is False
 
 
+class TestInstallWorktreeDeps:
+    def test_runs_only_matching_commands(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        fake_config["workspace"]["dep_commands"] = [
+            {"match": "repo", "cmd": "pnpm install --frozen-lockfile"},
+            {"match": "other", "cmd": "npm ci"},
+        ]
+        with patch("core.deps.subprocess.run") as run:
+            run.return_value.returncode = 0
+            deps.install_worktree_deps(fake_config, "repo", wt)
+        assert [c.args[0] for c in run.call_args_list] == [
+            ["pnpm", "install", "--frozen-lockfile"]]
+
+    def test_failed_command_is_logged(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        fake_config["workspace"]["dep_commands"] = [{"match": "repo", "cmd": STUB_FAIL}]
+        with patch("core.deps.log.emit") as emit:
+            deps.install_worktree_deps(fake_config, "repo", wt)
+        assert [c.args[0] for c in emit.call_args_list] == ["worktree_dep_command_failed"]
+
+    def test_success_is_not_logged(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        fake_config["workspace"]["dep_commands"] = [
+            {"match": "repo", "cmd": "python3 -c \"pass\""}]
+        with patch("core.deps.log.emit") as emit:
+            deps.install_worktree_deps(fake_config, "repo", wt)
+        assert not emit.called
+
+    def test_key_selects_the_command_list(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        fake_config["workspace"]["dep_commands"] = [{"match": "repo", "cmd": "npm ci"}]
+        fake_config["workspace"]["review_dep_commands"] = [
+            {"match": "repo", "cmd": "pnpm install --ignore-scripts"}]
+        with patch("core.deps.subprocess.run") as run:
+            run.return_value.returncode = 0
+            deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert [c.args[0] for c in run.call_args_list] == [
+            ["pnpm", "install", "--ignore-scripts"]]
+
+
 class TestExportPnpmStore:
     def test_sets_store_dir(self, fake_config, monkeypatch):
         monkeypatch.delenv("npm_config_store_dir", raising=False)
