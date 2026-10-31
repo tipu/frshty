@@ -111,3 +111,15 @@ def test_removes_nothing_when_a_live_process_is_unreadable(tmp_path):
     assert result["removed"] == []
     assert "stopped" in result
     assert (root / SO).exists() and (root / "pytest-of-claude" / "pytest-1").exists()
+
+
+def test_reads_maps_with_a_non_utf8_path(tmp_path):
+    root, proc, config = _tree(tmp_path)
+    _process(proc, 10, maps=[str(root / SO)])
+    with open(proc / "10" / "maps", "ab") as f:
+        f.write(b"7f04-7f05 r-xp 00000000 00:2b 13 /tmp/bad\xff.so\n")
+    (root / "pytest-of-claude" / "pytest-1" / ".lock").write_text("99999999999999999999999")
+    _age(root / "pytest-of-claude" / "pytest-1")
+    result = tmp_gc.sweep(config, force=True, root=str(root), proc=str(proc))
+    assert str(root / SO) in result["kept"]
+    assert str(root / "pytest-of-claude" / "pytest-1") in result["removed"]
