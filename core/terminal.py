@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 import core.state as state
 import core.tmux as tmux_target
-from core.llm import DEEPSEEK_ENV, review_checkout_args
+from core.llm import DEEPSEEK_ENV, codex_review_checkout_args, review_checkout_args
 from core.paths import frshty_root
 
 MAX_SCROLLBACK = 1024 * 1024
@@ -112,14 +112,16 @@ def claude_cmd(config: dict | None = None, redact: bool = False, cwd: str = "") 
 
 
 def codex_cmd(config: dict | None = None, subcommand: str = "",
-              redact: bool = False) -> str:
+              redact: bool = False, cwd: str = "") -> str:
     """Interactive codex command line for one instance's tmux pane.
 
     Same shape as claude_cmd: the instance's env overrides and CODEX_HOME are
     prepended because _child_env() drops every variable it does not
     whitelist, so without them the pane authenticates as the operator's
     default codex account. The subcommand goes before the flags because codex
-    parses them per subcommand."""
+    parses them per subcommand. `cwd` is the directory the pane starts in, and
+    a pull request checkout there adds the flags of
+    core.llm.codex_review_checkout_args."""
     codex_cfg = ((config or {}).get("llm") or {}).get("codex") or {}
     env = {str(k): str(v) for k, v in (codex_cfg.get("env") or {}).items()}
     config_dir = codex_cfg.get("config_dir")
@@ -129,7 +131,9 @@ def codex_cmd(config: dict | None = None, subcommand: str = "",
     head = f"{_env_prefix(env, redact, CONFIG_DIR_VARS['codex'])}{bin_name}"
     if subcommand:
         head = f"{head} {subcommand}"
-    return f"{head} --dangerously-bypass-approvals-and-sandbox"
+    review = codex_review_checkout_args(cwd)
+    return (f"{head} --dangerously-bypass-approvals-and-sandbox"
+            + (f" {shlex.join(review)}" if review else ""))
 
 
 CODEX_NOTIFY_SCRIPT = os.path.join(
@@ -492,8 +496,8 @@ def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run:
     else:
         target = shlex.quote(agent_session_id) if agent_session_id else "--last"
         sub, args = "resume", f" {notify} {target}"
-    launch_pane_command(key, cwd, codex_cmd(config, sub) + args)
-    record_launch_command(session_uuid, codex_cmd(config, sub, redact=True) + args)
+    launch_pane_command(key, cwd, codex_cmd(config, sub, cwd=cwd) + args)
+    record_launch_command(session_uuid, codex_cmd(config, sub, redact=True, cwd=cwd) + args)
 
 
 def launch_agent(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
