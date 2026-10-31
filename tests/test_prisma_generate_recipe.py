@@ -108,7 +108,7 @@ def test_a_failed_generate_keeps_the_output(tmp_path):
     (kept / "client.ts").write_text("old")
     failed = subprocess.CompletedProcess([], 1, "", "Validation Error Count: 1")
     with patch("prisma_generate.subprocess.run", return_value=failed):
-        assert _generate(wt) == "rc=1: Validation Error Count: 1"
+        assert _generate(wt) == "rc=1: stderr: Validation Error Count: 1"
     assert (kept / "client.ts").read_text() == "old"
 
 
@@ -141,6 +141,6 @@ def test_the_script_exits_nonzero_with_the_reason(tmp_path):
     path = _fake_node(tmp_path, 'echo "Validation Error Count: 1" >&2\nexit 1\n')
     result = _run_script(wt, path)
     assert result.returncode == 1
-    assert "prisma generate failed: rc=1: Validation Error Count: 1" in result.stderr
+    assert "prisma generate failed: rc=1: stderr: Validation Error Count: 1" in result.stderr
     assert not (wt / OUTPUT).exists()
 
