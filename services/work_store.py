@@ -383,6 +383,31 @@ def permission_dialog_closed(lines: list[str]) -> bool:
             and not any(_DIALOG_FOOTER in ln for ln in lines))
 
 
+def clear_closed_permission(session_id: str) -> bool:
+    """Take a held permission question off the board once its dialog is gone.
+
+    A dialog answered in the pane, or one Claude Code denies on its own
+    timeout, sends no event. The agent then keeps calling tools, and the
+    question stayed on the board until the turn ended. Each tool call checks
+    the pane, and a pane without the dialog clears the question.
+
+    Returns whether a question was cleared."""
+    held = db.query_one(
+        "SELECT r.tmux_key, i.id, i.pending_question FROM work_runs r "
+        "JOIN work_items i ON i.id = r.work_item_id WHERE r.session_id = ?", (session_id,))
+    if not held or _permission_keys(held["pending_question"]) is None:
+        return False
+    if not permission_dialog_closed(_capture_pane(f"term-{held['tmux_key']}")):
+        return False
+    with db.tx() as c:
+        return bool(c.execute(
+            "UPDATE work_items SET pending_question = '', "
+            "state = CASE WHEN state = 'needs_you' THEN 'agent_working' ELSE state END, "
+            "stop_reason = CASE WHEN state = 'needs_you' THEN '' ELSE stop_reason END, "
+            "updated_at = ? WHERE id = ? AND pending_question = ?",
+            (_now(), held["id"], held["pending_question"])).rowcount)
+
+
 def _shows_held_dialog(tmux_key: str, pending: str) -> bool:
     """Whether the pane shows the dialog the held question was read from."""
     dialog = permission_dialog(_capture_pane(f"term-{tmux_key}"))
