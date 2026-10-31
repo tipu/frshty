@@ -61,6 +61,7 @@ def load_config(path: str) -> dict:
     ws.setdefault("exclude", [])
     ws.setdefault("dep_commands", [])
     ws.setdefault("review_dep_commands", [])
+    ws.setdefault("review_prisma", [])
 
     raw["features"].setdefault("auto_review", True)
     raw["features"].setdefault("correspondence", True)
