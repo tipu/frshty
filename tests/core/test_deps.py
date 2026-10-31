@@ -248,9 +248,20 @@ class TestInstallWorktreeDeps:
         with patch("core.deps.log.emit") as emit:
             deps.install_worktree_deps(fake_config, "repo", wt)
         reason = emit.call_args.kwargs["meta"]["reason"]
-        assert reason.startswith("rc=3: ") and reason.endswith("schema is invalid")
-        assert len(reason) == len("rc=3: ") + 500
+        assert reason.startswith("rc=3: stderr: ") and reason.endswith("schema is invalid")
+        assert len(reason) == len("rc=3: stderr: ") + 500
         assert reason in emit.call_args.args[1]
+
+    def test_failed_command_logs_the_stdout_tail_beside_stderr_warnings(self, fake_config, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        cmd = ("python3 -c \"import sys; sys.stderr.write('WARN npmrc'); "
+               "print('ERR_PNPM_NO_OFFLINE_TARBALL'); sys.exit(1)\"")
+        fake_config["workspace"]["dep_commands"] = [{"match": "repo", "cmd": cmd}]
+        with patch("core.deps.log.emit") as emit:
+            deps.install_worktree_deps(fake_config, "repo", wt)
+        assert emit.call_args.kwargs["meta"]["reason"] == (
+            "rc=1: stderr: WARN npmrc | stdout: ERR_PNPM_NO_OFFLINE_TARBALL")
 
     def test_success_is_not_logged(self, fake_config, tmp_path):
         wt = tmp_path / "wt"
