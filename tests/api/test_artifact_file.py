@@ -262,7 +262,7 @@ class TestArtifactClaudeRoute:
         assert len(launched) == 1
         assert launched[0][0] == key
         assert launched[0][1] == str(tmp_path / "run-workspace" / "docs")
-        assert "--append-system-prompt" in launched[0][2]
+        assert f"--append-system-prompt-file {tmp_path / 'launch' / f'{key}.md'}" in launched[0][2]
         seed = (tmp_path / "launch" / f"{key}.md").read_text()
         assert str(tmp_path / "run-workspace" / "docs" / "report.html") in seed
         assert "artifact report test" in seed

@@ -520,9 +520,10 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
         cwd = str(review_dir)
 
     terminal.kill_terminal(session_id)
+    ctx_path = terminal.launch_context_path(re.sub(r"[^A-Za-z0-9_.-]", "_", session_id), context)
     terminal.launch_pane_command(
         session_id, cwd,
-        f"{terminal.claude_cmd(_config)} --append-system-prompt {shlex.quote(context)}")
+        f"{terminal.claude_cmd(_config)} --append-system-prompt-file {shlex.quote(ctx_path)}")
 
     return {"session_id": session_id}
 
