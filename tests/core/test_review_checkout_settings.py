@@ -61,7 +61,7 @@ def _checkout_with_hook(path: Path, marker: Path) -> Path:
 
 
 def _review_worktree(tmp_path: Path) -> Path:
-    return tmp_path / "state" / "titurco" / "reviews" / "app" / "feature-x" / "worktree"
+    return tmp_path / "state" / "rouzaisworks" / "reviews" / "app" / "feature-x" / "worktree"
 
 
 def _argv(tmp_path: Path) -> list[str]:
@@ -70,7 +70,7 @@ def _argv(tmp_path: Path) -> list[str]:
 
 def test_the_stub_runs_a_project_hook_outside_a_review_checkout(stub):
     marker = stub / "hook-ran"
-    own = _checkout_with_hook(stub / "state" / "titurco" / "worktrees" / "app", marker)
+    own = _checkout_with_hook(stub / "state" / "rouzaisworks" / "worktrees" / "app", marker)
 
     assert llm.run_agentic("review", cwd=own, timeout=30) == "ok"
 
@@ -100,7 +100,7 @@ def test_a_balanced_run_in_a_review_checkout_does_not_run_the_hook(stub):
 
 def test_a_ticket_review_rooted_in_the_reviews_folder_does_not_run_a_hook(stub):
     marker = stub / "hook-ran"
-    reviews = _checkout_with_hook(stub / "state" / "titurco" / "reviews", marker)
+    reviews = _checkout_with_hook(stub / "state" / "rouzaisworks" / "reviews", marker)
 
     assert llm.run_agentic("review", cwd=reviews, timeout=30) == "ok"
 
@@ -136,9 +136,9 @@ def test_the_review_plugin_pins_the_tsserver_the_code_checks():
 
 
 @pytest.mark.parametrize("parts, expected", [
-    (("titurco", "reviews"), True),
-    (("titurco", "reviews", "app", "pr-7", "worktree"), True),
-    (("titurco", "worktrees", "app"), False),
+    (("rouzaisworks", "reviews"), True),
+    (("rouzaisworks", "reviews", "app", "pr-7", "worktree"), True),
+    (("rouzaisworks", "worktrees", "app"), False),
     (("reviews", "app"), False),
     ((), False),
 ])
@@ -149,7 +149,7 @@ def test_review_checkout_reads_the_instance_layout(tmp_path, monkeypatch, parts,
 
 def test_a_path_outside_the_state_root_is_not_a_review_checkout(tmp_path, monkeypatch):
     monkeypatch.setenv("FRSHTY_ROOT", str(tmp_path / "state"))
-    assert review_checkout(tmp_path / "elsewhere" / "titurco" / "reviews") is False
+    assert review_checkout(tmp_path / "elsewhere" / "rouzaisworks" / "reviews") is False
 
 
 class TestTaskPane:
