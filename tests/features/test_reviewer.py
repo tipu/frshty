@@ -319,6 +319,54 @@ class TestReviewPr:
         assert result is None
 
 
+class TestEnsureReviewWorktreeInstallsDeps:
+    def _config(self, tmp_path):
+        return {"_state_dir": tmp_path, "workspace": {"root": tmp_path, "dep_commands": []}}
+
+    def test_a_new_worktree_gets_its_dependencies(self, tmp_path):
+        pr = make_pr()
+        config = self._config(tmp_path)
+        wt = tmp_path / "reviews" / pr["repo"] / pr["branch"].replace("/", "-") / "worktree"
+        with patch("features.reviewer.get_repos",
+                   return_value=[{"name": pr["repo"], "path": tmp_path / "repo"}]), \
+             patch("features.reviewer.git_util.add_detached_worktree", return_value=wt), \
+             patch("features.reviewer.deps.install_worktree_deps") as install, \
+             patch("features.reviewer.deps.generate_review_prisma") as prisma:
+            assert reviewer._ensure_review_worktree(config, pr) == wt
+        install.assert_called_once_with(config, pr["repo"], wt, "review_dep_commands")
+        prisma.assert_called_once_with(config, pr["repo"], wt)
+
+    def test_a_reused_worktree_gets_its_dependencies_after_the_reset(self, tmp_path):
+        pr = make_pr()
+        config = self._config(tmp_path)
+        wt = tmp_path / "reviews" / pr["repo"] / pr["branch"].replace("/", "-") / "worktree"
+        wt.mkdir(parents=True)
+        (wt / ".git").write_text("gitdir: elsewhere\n")
+        order = []
+        with patch("features.reviewer.get_repos",
+                   return_value=[{"name": pr["repo"], "path": tmp_path / "repo"}]), \
+             patch("features.reviewer.subprocess.run",
+                   side_effect=lambda argv, **kw: order.append(argv[1])), \
+             patch("features.reviewer.deps.install_worktree_deps",
+                   side_effect=lambda *a: order.append("install")) as install, \
+             patch("features.reviewer.deps.generate_review_prisma",
+                   side_effect=lambda *a: order.append("prisma")):
+            assert reviewer._ensure_review_worktree(config, pr) == wt
+        install.assert_called_once_with(config, pr["repo"], wt, "review_dep_commands")
+        assert order == ["fetch", "reset", "install", "prisma"]
+
+    def test_a_failed_add_installs_nothing(self, tmp_path):
+        pr = make_pr()
+        with patch("features.reviewer.get_repos",
+                   return_value=[{"name": pr["repo"], "path": tmp_path / "repo"}]), \
+             patch("features.reviewer.git_util.add_detached_worktree", return_value=None), \
+             patch("features.reviewer.deps.install_worktree_deps") as install, \
+             patch("features.reviewer.deps.generate_review_prisma") as prisma:
+            assert reviewer._ensure_review_worktree(self._config(tmp_path), pr) is None
+        assert not install.called
+        assert not prisma.called
+
+
 class TestExtractTicketFromPr:
     def test_extracts_ticket_from_state(self):
         pr = {"repo": "backend", "id": 123, "branch": "feature/x"}

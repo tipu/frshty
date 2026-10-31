@@ -22,7 +22,7 @@ import core.git_util as git_util
 import features.defence as defence
 from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
-from core.deps import run_dep_command, relink_shared_venv
+from core.deps import install_worktree_deps, relink_shared_venv
 from core.claude_runner import (run_haiku, run_balanced, run_claude_code, extract_json,
                                 parse_structured, strict_object)
 from core.llm import NO_PUBLISH_RULE
@@ -1745,9 +1745,7 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             continue
         any_worktree = True
 
-        for dep in ws.get("dep_commands", []):
-            if dep["match"] == repo["name"]:
-                run_dep_command(config, repo["name"], wt_path, dep["cmd"])
+        install_worktree_deps(config, repo["name"], wt_path)
 
     if not any_worktree:
         log.emit("ticket_worktree_error", f"No worktrees created for {slug}, staying at new",
@@ -1930,9 +1928,7 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
                      meta={"ticket": ticket_key, "repo": repo["name"]})
             continue
         any_worktree = True
-        for dep in ws.get("dep_commands", []):
-            if dep["match"] == repo["name"]:
-                run_dep_command(config, repo["name"], wt_path, dep["cmd"])
+        install_worktree_deps(config, repo["name"], wt_path)
 
     if not any_worktree:
         raise RuntimeError(f"no worktrees created for {slug}")

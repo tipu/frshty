@@ -49,6 +49,29 @@ branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "your
 # dep_commands = [
 #     {match = "some-repo", cmd = "pipenv install --dev"},
 # ]
+# Run in a PR review worktree after each fetch, before the review session starts.
+# The command reads the PR's own config, so it must not run the PR's code or hand it a secret:
+# --ignore-scripts skips install scripts and --ignore-pnpmfile skips .pnpmfile hooks. --offline
+# blocks every download, so a PR .npmrc or lockfile cannot make pnpm fetch from a host it names,
+# and a PR packageManager or use-node-version setting cannot pull a binary to run. env -i starts
+# pnpm with only PATH, HOME and the shared store, so a PR .npmrc cannot expand a secret from the
+# environment. HOME stays, because pnpm keeps its pinned versions and metadata cache there, so HOME
+# must hold no .npmrc with a registry token. A PR that needs a package the shared store does not
+# hold gets no install, and the failure is logged as worktree_dep_command_failed.
+# review_dep_commands = [
+#     {match = "some-repo", cmd = "sh -c 'exec env -i PATH=\"$PATH\" HOME=\"$HOME\" npm_config_store_dir=\"$npm_config_store_dir\" pnpm install --frozen-lockfile --offline --ignore-scripts --ignore-pnpmfile'"},
+# ]
+# Generate a Prisma client in a PR review worktree after review_dep_commands, because
+# --ignore-scripts skips the postinstall that runs prisma generate. cli is a Prisma CLI that
+# the operator installs outside every worktree with scripts/install_review_prisma.sh <dir> <version>.
+# frshty copies the PR schema to a scratch directory, appends its own prisma-client generator
+# with the options below, and runs only that generator under env -i with a frshty config. No PR
+# generator, prisma.config.ts or node_modules package runs, and the CLI downloads no engine.
+# frshty then replaces output with the generated files. schema and output are worktree-relative.
+# A failure is logged as review_prisma_generate_failed and the review still runs.
+# review_prisma = [
+#     {match = "some-repo", cli = "/path/to/prisma-cli/node_modules/prisma/build/index.js", schema = "apps/app/prisma/schema.prisma", output = "apps/app/src/generated/prisma", options = {moduleFormat = "cjs"}},
+# ]
 # run_commands = ["cd django-app && pipenv run python manage.py runserver &", "cd frontend && npm start &"]
 
 [pr]
@@ -84,9 +107,10 @@ auto_merge = false                # governs both halves of frshty. the ticket pi
 #                                 # request on a project outside self_merge; the morning
 #                                 # digest names the skipped ones in one line instead.
 # mute_declined_proposals = true  # board instance only. default true. a proposal class
-#                                 # (merge_pr, review_pr, follow_up_person, health_doctor)
+#                                 # (merge_pr, review_pr, health_doctor)
 #                                 # declined more than 80% of its last 20 proposals is
-#                                 # not filed any more. class "other" is never muted.
+#                                 # not filed any more. classes "other" and
+#                                 # follow_up_person are never muted.
 # [work.projects]                 # board instance only. projects with no instance of
 # my-tool = "~/dev/my-tool"       # their own, key = root directory. the task board
 #                                 # offers each one whose directory exists.

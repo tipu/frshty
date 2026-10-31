@@ -18,7 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 import core.state as state
 import core.tmux as tmux_target
-from core.llm import DEEPSEEK_ENV
+from core.llm import DEEPSEEK_ENV, codex_review_checkout_args, review_checkout_args, with_lsp_shim
 from core.paths import frshty_root
 
 MAX_SCROLLBACK = 1024 * 1024
@@ -90,32 +90,40 @@ def with_config_dir(config: dict | None, agent: str, config_dir: str) -> dict:
     return base
 
 
-def claude_cmd(config: dict | None = None, redact: bool = False) -> str:
+def claude_cmd(config: dict | None = None, redact: bool = False, cwd: str = "") -> str:
     """Interactive claude command line for one instance's tmux pane.
 
     Mirrors core.llm.ClaudeProvider: same bin, same env overrides, same
     CLAUDE_CONFIG_DIR. Without this a pane authenticates as the operator's
     default account instead of the account the instance is configured with,
-    because _child_env() drops every variable it does not whitelist."""
+    because _child_env() drops every variable it does not whitelist. `cwd` is
+    the directory the pane starts in, and a pull request checkout there adds
+    the flags of core.llm.review_checkout_args."""
     claude_cfg = ((config or {}).get("llm") or {}).get("claude") or {}
     env = {str(k): str(v) for k, v in (claude_cfg.get("env") or {}).items()}
     config_dir = claude_cfg.get("config_dir")
     if config_dir and "CLAUDE_CONFIG_DIR" not in env:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    if "PATH" in env:
+        env["PATH"] = with_lsp_shim(os.path.expanduser(env["PATH"]))
     bin_name = claude_cfg.get("bin", "claude")
+    review = review_checkout_args(cwd)
     return (f"{_env_prefix(env, redact, CONFIG_DIR_VARS['claude'])}"
-            f"{bin_name} --dangerously-skip-permissions")
+            f"{bin_name} --dangerously-skip-permissions"
+            + (f" {shlex.join(review)}" if review else ""))
 
 
 def codex_cmd(config: dict | None = None, subcommand: str = "",
-              redact: bool = False) -> str:
+              redact: bool = False, cwd: str = "") -> str:
     """Interactive codex command line for one instance's tmux pane.
 
     Same shape as claude_cmd: the instance's env overrides and CODEX_HOME are
     prepended because _child_env() drops every variable it does not
     whitelist, so without them the pane authenticates as the operator's
     default codex account. The subcommand goes before the flags because codex
-    parses them per subcommand."""
+    parses them per subcommand. `cwd` is the directory the pane starts in, and
+    a pull request checkout there adds the flags of
+    core.llm.codex_review_checkout_args."""
     codex_cfg = ((config or {}).get("llm") or {}).get("codex") or {}
     env = {str(k): str(v) for k, v in (codex_cfg.get("env") or {}).items()}
     config_dir = codex_cfg.get("config_dir")
@@ -125,7 +133,9 @@ def codex_cmd(config: dict | None = None, subcommand: str = "",
     head = f"{_env_prefix(env, redact, CONFIG_DIR_VARS['codex'])}{bin_name}"
     if subcommand:
         head = f"{head} {subcommand}"
-    return f"{head} --dangerously-bypass-approvals-and-sandbox"
+    review = codex_review_checkout_args(cwd)
+    return (f"{head} --dangerously-bypass-approvals-and-sandbox"
+            + (f" {shlex.join(review)}" if review else ""))
 
 
 CODEX_NOTIFY_SCRIPT = os.path.join(
@@ -272,7 +282,7 @@ def _child_env():
         "HOME": os.path.expanduser("~"),
         "USER": os.environ.get("USER", "claude"),
         "TERM": "xterm-256color",
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PATH": with_lsp_shim(os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")),
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "TMUX": "",
     }
@@ -282,7 +292,7 @@ def _child_env():
 
 
 def _pane_env_args() -> list[str]:
-    args = []
+    args = ["-e", f"PATH={_child_env()['PATH']}"]
     for key in IMAGE_ENV + ALIAS_ENV:
         if os.environ.get(key):
             args += ["-e", f"{key}={os.environ[key]}"]
@@ -464,8 +474,8 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
         args = f" --resume {shlex.quote(session_uuid)}"
         if os.path.isfile(ctx_path) and os.path.getsize(ctx_path) > 0:
             args += f" --append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
-    launch_pane_command(key, cwd, claude_cmd(config) + args)
-    record_launch_command(session_uuid, claude_cmd(config, redact=True) + args)
+    launch_pane_command(key, cwd, claude_cmd(config, cwd=cwd) + args)
+    record_launch_command(session_uuid, claude_cmd(config, redact=True, cwd=cwd) + args)
 
 
 def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
@@ -488,8 +498,8 @@ def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run:
     else:
         target = shlex.quote(agent_session_id) if agent_session_id else "--last"
         sub, args = "resume", f" {notify} {target}"
-    launch_pane_command(key, cwd, codex_cmd(config, sub) + args)
-    record_launch_command(session_uuid, codex_cmd(config, sub, redact=True) + args)
+    launch_pane_command(key, cwd, codex_cmd(config, sub, cwd=cwd) + args)
+    record_launch_command(session_uuid, codex_cmd(config, sub, redact=True, cwd=cwd) + args)
 
 
 def launch_agent(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,

@@ -230,27 +230,6 @@ def test_a_refused_short_name_is_refused_only_in_a_file_grep(tmp_path):
     assert gate.bash_reason('grep -rn "loop" core/', path) == ""
 
 
-def test_rewrite_keeps_the_directory_of_an_earlier_statement(tmp_path, monkeypatch):
-    (tmp_path / "core").mkdir()
-    (tmp_path / "core" / "Makefile").write_text("loop:\n")
-    monkeypatch.chdir(tmp_path)
-    path = _transcript(tmp_path)
-    assert gate.bash_rewrite('cd core; ls; grep -n "def loop" a.py', path) == \
-        "cd core; ls; echo '" + _short(gate.SHORT_REMOVED_NOTICE) + "'"
-    assert gate.bash_rewrite('cd core; ls; grep -n "def loop" Makefile; grep -n "def build_index" b.py',
-                             path) == "cd core; ls; echo '" + \
-        _short(gate.SHORT_REMOVED_NOTICE, file="core/Makefile") + "'; echo '" + \
-        gate.REMOVED_NOTICE.format(name="build_index") + "'"
-
-
-def test_rewrite_removes_a_short_name_grep_with_the_document_symbol_notice(tmp_path):
-    out = gate.bash_rewrite('ls; grep -n "def loop" core/a.py', _transcript(tmp_path))
-    assert out == "ls; echo '" + _short(gate.SHORT_REMOVED_NOTICE) + "'"
-    assert gate._REMOVED.findall(_short(gate.SHORT_REMOVED_NOTICE)) == ["loop"]
-    shell = subprocess.run(["bash", "-c", out], capture_output=True, text=True, timeout=30)
-    assert shell.stdout.splitlines()[-1] == _short(gate.SHORT_REMOVED_NOTICE)
-
-
 def test_no_lsp_server_opens_the_gate_for_the_session(tmp_path):
     path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "build_index"),
                        _tool_result("No LSP server available for file type: .sh", "toolu_lsp"))
@@ -512,117 +491,11 @@ def test_the_deny_message_asks_for_the_lsp_call_first():
     assert gate._REFUSED.match(gate.REPEAT_REASON.format(name="fetch_rows")).group(1) == "fetch_rows"
 
 
-def _notice(name):
-    return "echo '" + gate.REMOVED_NOTICE.format(name=name) + "'"
-
-
-@pytest.mark.parametrize("command,expected", [
-    ('sed -n 1,5p a.py; grep -n "def fetch_rows" -A3 a.py | head; sed -n 9p b.py',
-     'sed -n 1,5p a.py; ' + _notice("fetch_rows") + '; sed -n 9p b.py'),
-    ('cd d && sed -n 1p a.py && grep -rnP "\\bdef\\s*fetch_rows\\(" a.py 2>&1',
-     'cd d && sed -n 1p a.py && ' + _notice("fetch_rows")),
-    ('grep -n "def fetch_rows" a.py\nls',
-     _notice("fetch_rows") + "\nls"),
-    ('cat a.py | grep -n "class FetchRows"; wc -l a.py',
-     _notice("FetchRows") + "; wc -l a.py"),
-    ('ls; LC_ALL=C grep -rn "def fetch_rows" src 2>/dev/null | sort | uniq -c | sed -n 1,5p',
-     'ls; ' + _notice("fetch_rows")),
-    ('ls; find . -name "*.py" | xargs grep -n "def fetch_rows" | head -3',
-     'ls; ' + _notice("fetch_rows")),
-    ("ls; grep -rn 'def fetch_rows' src | sort -u | uniq -c | sed -n '$p'",
-     'ls; ' + _notice("fetch_rows")),
-])
-def test_rewrite_removes_only_the_refused_grep(tmp_path, command, expected):
-    assert gate.bash_rewrite(command, _transcript(tmp_path)) == expected
-
-
-@pytest.mark.parametrize("command", [
-    'grep -n "def fetch_rows" a.py',
-    'cd d && grep -n "def fetch_rows" a.py',
-    'grep -n "def fetch_rows" a.py && sed -n 1p a.py',
-    'grep -q "def fetch_rows" a.py || echo missing; ls',
-    'ls $(grep -l "def fetch_rows" .); ls',
-    'ls `grep -l "def fetch_rows" .`; ls',
-    '(grep -n "def fetch_rows" a.py); ls',
-    'if grep -q "def fetch_rows" a.py; then ls; fi',
-    'for f in *.py; do grep -n "def fetch_rows" $f; done',
-    "cat <<EOF > x\nhi\nEOF\ngrep -n 'def fetch_rows' a.py; ls",
-    'grep -n "def fetch_rows" a.py & ls',
-    'ls; grep -n "def fetch_rows" a.py # note',
-    'ls; grep -n "def fetch_rows',
-    'grep -n "def fetch_rows" a.py > out.txt; wc -l out.txt',
-    'grep -n "def fetch_rows" a.py | tee out.txt >> log; ls',
-    "set -e; grep -q 'def ready' input.py; rm valuable.txt",
-    "set -euo pipefail\ngrep -n 'def ready' input.py\nls",
-    "grep -q 'def ready' input.py; echo $?",
-    "bash -c 'cp valuable.txt backup.txt; grep \"def ready\" input.py'; rm valuable.txt",
-    "grep -v 'def obsolete' input.py | tee new.py; mv new.py valuable.txt",
-    "grep -n 'def fetch_rows' a.py | sed -i s/x/y/ b.py; ls",
-    "grep -n 'def fetch_rows' a.py | xargs rm; ls",
-    "find . -name '*.pyc' -delete | grep -n 'def fetch_rows'; ls",
-    "find . -delete -exec grep -n 'def fetch_rows' {} +; ls",
-    "set -u -e; grep -q 'def ready' input.py; rm valuable.txt",
-    "grep -q 'def ready' input.py; test \"${?}\" -eq 0 && rm x",
-    "grep -v 'def obsolete' input.py | sort -o new.py; mv new.py valuable.txt",
-    "grep -v 'def obsolete' input.py | uniq - new.py; mv new.py valuable.txt",
-    "grep -n 'def fetch_rows' a.py | sed 'w new.py'; ls",
-    "grep 'def ready' \"$(cp valuable.txt backup.txt; echo input.py)\"; rm valuable.txt",
-    "find input.py -exec cp valuable.txt backup.txt \\; -exec grep 'def ready' '{}' \\;; rm valuable.txt",
-    "git grep -O'rm -rf x' -n 'def fetch_rows'; ls",
-    "rg --pre ./run.sh 'def fetch_rows'; ls",
-    "exec grep 'def ready' input.py; rm valuable.txt",
-    "grep -v 'def obsolete' input.py | sort -uonew.py; mv new.py valuable.txt",
-    "grep -v 'def obsolete' input.py | sort --compress-program=sh; ls",
-    "env find input.py -exec cp valuable.txt backup.txt \\; -exec grep 'def ready' '{}' \\;; rm valuable.txt",
-    "ls; env grep -n 'def fetch_rows' a.py",
-    "exec 3>new.py; grep -v 'def obsolete' input.py >&3; mv new.py valuable.txt",
-    "ls; grep -n 'def fetch_rows' a.py >&3",
-    "git -c core.fsmonitor=./x grep -n 'def fetch_rows'; ls",
-    "eval grep -n 'def fetch_rows' a.py; ls",
-    "ls; . ./env.sh; grep -n 'def fetch_rows' a.py",
-    "grep -q 'def ready' input.py; test \"$PIPESTATUS\" -eq 0 && rm valuable.txt",
-    "grep 'def ready' valuable.txt; cp \"$_\" backup.txt; rm valuable.txt",
-    "git grep -nO./save.sh 'def ready'; rm valuable.txt",
-    "ls $HOME; grep -n 'def fetch_rows' a.py",
-    "grep -n 'def fetch_rows' a.py | python3 -c 'import sys'; ls",
-])
-def test_rewrite_refuses_a_command_it_cannot_split_safely(tmp_path, command):
-    assert gate.bash_rewrite(command, _transcript(tmp_path)) == ""
-
-
-def test_rewrite_keeps_a_grep_the_session_looked_up(tmp_path):
-    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "fetch_rows"))
-    assert gate.bash_rewrite('ls; grep -n "def fetch_rows" a.py; grep -n "def build_index" a.py', path) == \
-        'ls; grep -n "def fetch_rows" a.py; ' + _notice("build_index")
-
-
-def test_rewrite_follows_redirects_of_stderr(tmp_path):
-    assert gate.bash_rewrite('ls 2>&1; grep -n "def fetch_rows" a.py &>/dev/null; ls', _transcript(tmp_path)) == \
-        'ls 2>&1; ' + _notice("fetch_rows") + "; ls"
-
-
-def test_the_removed_notice_counts_as_a_refusal(tmp_path):
-    path = _transcript(tmp_path, _tool_use("Bash", {"command": "ls; " + _notice("fetch_rows")}, "toolu_r"),
-                       _tool_result("a.py\n" + gate.REMOVED_NOTICE.format(name="fetch_rows"), "toolu_r"))
+def test_a_notice_from_the_removed_rewrite_still_counts_as_a_refusal(tmp_path):
+    notice = "[LSP gate] The grep for `fetch_rows` in this command did not run; the rest of the command ran. Make your next tool call LSP."
+    path = _transcript(tmp_path, _tool_use("Bash", {"command": "ls; echo '" + notice + "'"}, "toolu_r"),
+                       _tool_result("a.py\n" + notice, "toolu_r"))
     assert gate.bash_reason('grep -n "fetch_rows" a.py', path) == gate.REPEAT_REASON.format(name="fetch_rows")
-
-
-def test_the_notice_runs_in_a_shell(tmp_path):
-    out = subprocess.run(["bash", "-c", gate.bash_rewrite("true; grep -n 'def x$y' a.py",
-                                                          _transcript(tmp_path))],
-                         capture_output=True, text=True, timeout=30)
-    assert out.stdout.strip() == gate.SHORT_REMOVED_NOTICE.format(name="x$y", file="a.py")
-
-
-def test_hook_runs_the_rest_of_a_compound_command(tmp_path):
-    item_id = work_store.create_item("lsp gate rewrite")
-    sid = f"sid-lsp-rw-{item_id}"
-    work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
-    r = _run_hook(sid, 'sed -n 1p a.py; grep -n "def parse_structured" core/llm.py', _transcript(tmp_path))
-    assert r.returncode == 0, r.stderr
-    out = json.loads(r.stdout)["hookSpecificOutput"]
-    assert out["permissionDecision"] == "allow"
-    assert out["updatedInput"]["command"] == "sed -n 1p a.py; " + _notice("parse_structured")
 
 
 def test_hook_denies_a_compound_command_that_commits(tmp_path):
@@ -633,11 +506,22 @@ def test_hook_denies_a_compound_command_that_commits(tmp_path):
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
+def test_hook_denies_a_compound_command_with_a_refused_grep(tmp_path):
+    item_id = work_store.create_item("lsp gate compound")
+    sid = f"sid-lsp-compound-{item_id}"
+    work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+    r = _run_hook(sid, 'sed -n 1p a.py; grep -n "def parse_structured" core/llm.py', _transcript(tmp_path))
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert "updatedInput" not in out
+    assert out["permissionDecisionReason"] == gate.DENY_REASON.format(name="parse_structured")
 
-def test_hook_rewrites_a_compound_command_in_a_pipeline_run(tmp_path):
-    r = _run_hook("sid-pipeline-rewrite", 'sed -n 1p a.py; grep -n "def parse_structured" core/llm.py',
+
+def test_hook_denies_a_compound_command_in_a_pipeline_run(tmp_path):
+    r = _run_hook("sid-pipeline-compound", 'sed -n 1p a.py; grep -n "def parse_structured" core/llm.py',
                   _transcript(tmp_path), pipeline=True)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)["hookSpecificOutput"]
-    assert out["permissionDecision"] == "allow"
-    assert out["updatedInput"]["command"] == "sed -n 1p a.py; " + _notice("parse_structured")
+    assert out["permissionDecision"] == "deny"
+    assert "updatedInput" not in out

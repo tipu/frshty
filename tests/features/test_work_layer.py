@@ -1,5 +1,10 @@
 import base64
+import importlib.util
+import io
 import json
+import os
+import sqlite3
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -2408,6 +2413,112 @@ class TestBackgroundWait:
         work_store.record_event(sid, "Stop", {"transcript_path": path})
         assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
                             (item_id,))["pending_question"]
+
+    def test_next_tool_call_clears_a_closed_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-22"
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: self._DIALOG[:4])
+        assert work_store.clear_closed_permission(sid) is True
+        item = db.query_one("SELECT state, stop_reason, pending_question FROM work_items "
+                            "WHERE id = ?", (item_id,))
+        assert item["pending_question"] == ""
+        assert item["state"] == "agent_working"
+        assert item["stop_reason"] == ""
+        assert work_store.clear_closed_permission(sid) is False
+
+    def test_next_tool_call_keeps_an_open_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-23"
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        for pane in (self._DIALOG, self._DIALOG[8:], []):
+            monkeypatch.setattr(work_store, "_capture_pane", lambda session, p=pane: list(p))
+            assert work_store.clear_closed_permission(sid) is False
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "needs_you"
+        assert item["pending_question"]
+
+    def test_next_tool_call_keeps_an_asked_question(self, tmp_path, monkeypatch):
+        item_id = _mkitem("asked question tool call item")
+        sid = f"sid-bgpq-24-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_question(sid, {"questions": [{"question": "Staging or prod?"}]})
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: [])
+        assert work_store.clear_closed_permission(sid) is False
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+
+    def test_hook_gates_do_not_wait_on_the_clear(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-25"
+        self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        lock = sqlite3.connect(str(db._DB_PATH))
+        lock.execute("BEGIN IMMEDIATE")
+        try:
+            start = time.monotonic()
+            r = subprocess.run(
+                [sys.executable, "scripts/work_hook.py"],
+                input=json.dumps({"session_id": sid, "hook_event_name": "PreToolUse",
+                                  "tool_name": "Bash", "tool_input": {"command": "ls"}}),
+                capture_output=True, text=True, timeout=60,
+                env={**os.environ, "FRSHTY_DB": str(db._DB_PATH)})
+            elapsed = time.monotonic() - start
+        finally:
+            lock.rollback()
+            lock.close()
+        assert r.returncode == 0, r.stderr
+        assert elapsed < 10
+
+    def _hook_module(self, monkeypatch):
+        spec = importlib.util.spec_from_file_location("work_hook_clear", "scripts/work_hook.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        monkeypatch.setattr(mod, "DB_PATH", str(db._DB_PATH))
+        return mod
+
+    def test_hook_parent_leaves_the_clear_to_the_child(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-26"
+        self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        mod = self._hook_module(monkeypatch)
+        forks = []
+        monkeypatch.setattr(mod.os, "fork", lambda: forks.append(1) or 4242)
+        monkeypatch.setattr(work_store, "clear_closed_permission",
+                            lambda s: pytest.fail("the parent ran the clear"))
+        monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps({
+            "session_id": sid, "hook_event_name": "PreToolUse",
+            "tool_name": "Bash", "tool_input": {"command": "ls"}})))
+        assert mod.main() == 0
+        assert forks == [1]
+
+    def test_hook_child_clears_a_closed_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-29"
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: self._DIALOG[:4])
+        mod = self._hook_module(monkeypatch)
+        monkeypatch.setattr(mod.os, "fork", lambda: 0)
+        monkeypatch.setattr(mod.os, "setsid", lambda: None)
+        monkeypatch.setattr(mod.os, "dup2", lambda a, b: None)
+
+        def exit_(code):
+            raise SystemExit(code)
+        monkeypatch.setattr(mod.os, "_exit", exit_)
+        with pytest.raises(SystemExit):
+            mod._clear_closed_permission_detached(sid)
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["pending_question"] == ""
+        assert item["state"] == "agent_working"
+
+    def test_hook_forks_only_for_a_held_permission(self, tmp_path, monkeypatch):
+        item_id = _mkitem("asked question fork item")
+        sid = f"sid-bgpq-27-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_question(sid, {"questions": [{"question": "Staging or prod?"}]})
+        mod = self._hook_module(monkeypatch)
+        assert mod._holds_permission(sid) is False
+        monkeypatch.setattr(mod.os, "fork", lambda: pytest.fail("forked without a permission"))
+        mod._clear_closed_permission_detached(sid)
+        other = "sid-bgpq-28"
+        self._permission_item(tmp_path, monkeypatch, other, self._DIALOG)
+        assert mod._holds_permission(other) is True
 
     def test_session_end_clears_the_dialog(self, tmp_path, monkeypatch):
         sid = "sid-bgpq-9"

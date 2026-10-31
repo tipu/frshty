@@ -248,7 +248,7 @@ class TestArtifactClaudeRoute:
                                                          "agent_running": running})
         monkeypatch.setattr(work_routes.terminal, "launch_pane_command",
                             lambda key, cwd, cmd: launched.append((key, cwd, cmd)))
-        monkeypatch.setattr(work_routes.terminal, "claude_cmd", lambda config: "claude")
+        monkeypatch.setattr(work_routes.terminal, "claude_cmd", lambda config, cwd="": "claude")
         monkeypatch.setattr(work_routes.work_launch, "personal_config", lambda: {})
         monkeypatch.setattr(work_routes, "schedule_discuss_kill", scheduled.append)
         return launched, scheduled
