@@ -426,6 +426,18 @@ def main() -> int:
                         }
                     }))
                 return 0
+            if tool == "Monitor":
+                reason = sleep_gate.self_match_reason(
+                    (data.get("tool_input") or {}).get("command") or "")
+                if reason:
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
+                        }
+                    }))
+                return 0
             if tool == "Grep":
                 output = _lsp_output(data)
                 if output:
@@ -437,7 +449,7 @@ def main() -> int:
                 if output:
                     print(json.dumps(output))
                     return 0
-                reason = sleep_gate.bash_reason(
+                reason = sleep_gate.self_match_reason(command) or sleep_gate.bash_reason(
                     command, bool((data.get("tool_input") or {}).get("run_in_background")))
                 if reason:
                     print(json.dumps({

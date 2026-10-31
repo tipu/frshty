@@ -127,3 +127,84 @@ def test_hook_leaves_a_session_that_is_not_a_task_alone():
     r = _run_hook("sid-not-a-work-run-sleep", "sleep 600")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == ""
+
+
+@pytest.mark.parametrize("command", [
+    'until ! pgrep -f "deepseek-v4.1-flash" >/dev/null; do sleep 5; done; echo done',
+    'tail -40 out; pgrep -f "deepseek-v4.1-flash" >/dev/null && echo RUNNING',
+    "while pgrep -f opencode; do sleep 2; done",
+    "while [ $(pgrep -fc server.py) -gt 0 ]; do sleep 1; done",
+    'until [ -z "$(pgrep -f deepseek-v4.1-flash)" ]; do sleep 5; done',
+    'while test -n "`pgrep -f codex`"; do sleep 5; done',
+    """until [ -z "$(pgrep -f 'deepseek(-v4.1-flash)?')" ]; do sleep 5; done""",
+    'echo "$(echo $(pgrep -fc codex))"',
+    "until [ -z `pgrep -f app` ]; do sleep 5; done",
+    "x=`pkill -f app`; echo $x",
+    "# wait for the process's exit\nuntil [ -z \"$(pgrep -f deepseek-v4.1-flash)\" ]; do sleep 5; done",
+    "pgrep -u tipu -f python3",
+    "pgrep --full codex",
+    "pkill -f opencode",
+    "until ! pgrep -f 'deepseek-v4.1-flash.*$' >/dev/null; do sleep 5; done",
+    "bash -c 'until ! pgrep -f codex; do sleep 1; done'",
+])
+def test_denies_a_pgrep_that_matches_itself(command):
+    reason = gate.self_match_reason(command)
+    assert reason.startswith("Blocked by the wait gate"), command
+    assert "matches its own command line" in reason
+    assert "kill -0" in reason
+
+
+@pytest.mark.parametrize("command", [
+    "pgrep opencode",
+    "pgrep -x opencode",
+    'pgrep -f "[d]eepseek-v4.1-flash"',
+    "pgrep -f $PATTERN",
+    "pgrep -f '^python3 server.py'",
+    "while kill -0 4242 2>/dev/null; do sleep 5; done",
+    "grep -n 'pgrep -f' scripts/",
+    "echo pgrep -f opencode",
+    "echo '$(pgrep -f opencode)'",
+    "echo x'$(pgrep -f app)'",
+    "echo ok # $(pgrep -f app)",
+    'echo "\\$(pgrep -f app)"',
+    "python3 - <<'EOF'\nprint('$(pgrep -f app)')\nEOF",
+    "pkill -x opencode",
+    'pgrep -f "${NAME}"',
+    "pgrep -f '(a+)+b'; echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+])
+def test_allows_a_pgrep_that_cannot_match_itself(command):
+    assert gate.self_match_reason(command) == "", command
+
+
+def _run_tool_hook(session_id, tool, tool_input):
+    return subprocess.run(
+        [sys.executable, "scripts/work_hook.py"], cwd=ROOT,
+        input=json.dumps({"session_id": session_id, "hook_event_name": "PreToolUse",
+                          "tool_name": tool, "cwd": ROOT, "transcript_path": "",
+                          "tool_input": tool_input}),
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ, "FRSHTY_DB": str(db._DB_PATH)},
+    )
+
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Bash", {"command": 'until ! pgrep -f "deepseek-v4.1-flash"; do sleep 5; done',
+              "run_in_background": True}),
+    ("Bash", {"command": "pgrep -f opencode && echo RUNNING"}),
+    ("Monitor", {"command": "until ! pgrep -f codex; do sleep 1; done; echo gone",
+                 "description": "codex exit", "timeout_ms": 600000}),
+])
+def test_hook_denies_a_self_matching_wait_in_a_task(tool, tool_input):
+    r = _run_tool_hook(_task_session(), tool, tool_input)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "deny"
+    assert "matches its own command line" in out["permissionDecisionReason"]
+
+
+def test_hook_allows_a_pid_wait_in_a_monitor():
+    r = _run_tool_hook(_task_session(), "Monitor",
+                       {"command": "while kill -0 4242; do sleep 1; done; echo gone",
+                        "description": "pid exit", "timeout_ms": 600000})
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == ""

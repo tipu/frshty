@@ -231,6 +231,7 @@ class TestCodexLaunch:
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
         assert "Do not wait for a process in a shell loop that sleeps and checks" in prompt
         assert "Run the long command in the background" in prompt
+        assert "Never wait on `pgrep -f <pattern>`" in prompt
 
     def test_the_brief_hands_a_ci_wait_to_the_board(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
