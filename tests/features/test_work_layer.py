@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import core.db as db
-from services import work_artifacts, work_launch, work_store
+from services import work_artifacts, work_ci_wait, work_launch, work_store
 from web.work import router as work_router
 
 
@@ -1892,6 +1892,23 @@ class TestQuestions:
         assert item["state"] == "needs_you"
         assert "Which bucket" in item["pending_question"]
         assert "Which bucket" in item["stop_reason"]
+
+    @pytest.mark.parametrize("prompt", [
+        work_store.CHECK_IN_PROMPT,
+        work_store.BUDGET_SPENT_PROMPT,
+        work_store.BG_WAIT_NUDGE_PROMPT.format(minutes=30, tasks="b2ms6zphy"),
+        work_ci_wait.RESULT_PROMPT.format(pr=7, result="all checks passed"),
+        work_launch.RESTART_CONTINUE_PROMPT,
+        work_store.continue_prompt(),
+    ])
+    def test_board_prompt_keeps_pending_question(self, prompt):
+        item_id, sid = self._mkrun("board prompt keeps question")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": prompt})
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
 
     def test_operator_prompt_still_clears_pending_question(self):
         item_id, sid = self._mkrun("operator prompt clears question")
