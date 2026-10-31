@@ -70,9 +70,7 @@ branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "your
 # frshty then replaces output with the generated files. schema and output are worktree-relative.
 # A failure is logged as review_prisma_generate_failed and the review still runs.
 # review_prisma = [
-#     {match = "some-repo", cli = "/path/to/prisma-cli/node_modules/prisma/build/index.js",
-#      schema = "apps/app/prisma/schema.prisma", output = "apps/app/src/generated/prisma",
-#      options = {moduleFormat = "cjs"}},
+#     {match = "some-repo", cli = "/path/to/prisma-cli/node_modules/prisma/build/index.js", schema = "apps/app/prisma/schema.prisma", output = "apps/app/src/generated/prisma", options = {moduleFormat = "cjs"}},
 # ]
 # run_commands = ["cd django-app && pipenv run python manage.py runserver &", "cd frontend && npm start &"]
 
