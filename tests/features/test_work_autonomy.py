@@ -435,6 +435,17 @@ class TestProgressLines:
         assert work_store.record_progress(sid, "", texts=["PROGRESS: same line"]) == ""
         assert len(_events(item_id, "progress")) == 1
 
+    def test_a_progress_line_reaches_the_event_feed_once(self):
+        item_id, sid = _mkrun("feed progress")
+        db.execute("UPDATE work_items SET instance_key = ? WHERE id = ?", ("feedinst", item_id))
+        work_store.record_progress(sid, "", texts=["PROGRESS: feed line"])
+        work_store.record_progress(sid, "", texts=["PROGRESS: feed line"])
+        rows = db.query_all(
+            "SELECT instance_key, job, summary FROM log_events WHERE event = 'work_progress' "
+            "AND summary LIKE ?", (f"work item {item_id}:%",))
+        assert [dict(r) for r in rows] == [{"instance_key": "feedinst", "job": "feedinst",
+                                           "summary": f"work item {item_id}: feed line"}]
+
     def test_the_newest_line_wins(self):
         item_id, sid = _mkrun("newest progress")
         work_store.record_progress(sid, "", texts=["PROGRESS: first", "PROGRESS: second"])
