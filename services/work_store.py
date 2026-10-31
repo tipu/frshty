@@ -450,6 +450,7 @@ _PROPOSAL_CLASSES = (
     ("health_doctor", re.compile(r"^(?:\[[^\]]*\]|doctor\b|restore\b)", re.IGNORECASE), False),
 )
 CLIENT_PR_CLASSES = ("merge_pr", "review_pr")
+MUTE_EXEMPT_CLASSES = ("follow_up_person",)
 
 
 class ProposalSuppressed(ProposalKeyHeld):
@@ -477,8 +478,8 @@ def proposal_class(objective: str | None) -> str:
     pull request, and the objective has to name one. follow_up_person is the
     "Follow up with <person>" card the inboxes file, and health_doctor is a
     "Doctor ..." or "Restore ..." card or one global_watch filed, which tags
-    the instance in brackets. Everything else is OTHER_CLASS, which is never
-    muted."""
+    the instance in brackets. Everything else is OTHER_CLASS. OTHER_CLASS and
+    the MUTE_EXEMPT_CLASSES are never muted."""
     text = " ".join((objective or "").split())
     for name, pattern, needs_pr in _PROPOSAL_CLASSES:
         if pattern.search(text) and (not needs_pr or _PR_REF_RE.search(text)):
@@ -547,9 +548,11 @@ def _refuse_proposal(c, objective: str, instance_key: str | None, contexts: str,
     declined conversation by rules of its own passes decline_hold=False. A
     merge or review of a client pull request is not filed unless the board's
     [work] client_pr_proposals says so. A class the operator keeps declining
-    is muted unless [work] mute_declined_proposals is false. work_launch is
-    imported here rather than at the top because work_launch imports this
-    module."""
+    is muted unless [work] mute_declined_proposals is false. A class in
+    MUTE_EXEMPT_CLASSES is never muted: a declined follow-up mostly means the
+    operator already answered, and a muted class gets no new decisions, so
+    its mute never lifts. work_launch is imported here rather than at the top
+    because work_launch imports this module."""
     from services import work_launch
     holder = (_held_by_decline(c, objective, instance_key, source_item_id)
               if decline_hold else None)
@@ -569,7 +572,7 @@ def _refuse_proposal(c, objective: str, instance_key: str | None, contexts: str,
             PROPOSAL_CLIENT_PR_SKIPPED_EVENT,
             f"a {klass} proposal on a client project ({', '.join(clients)}) is not filed",
             proposal_class=klass)
-    if not policy["mute_declined_proposals"]:
+    if klass in MUTE_EXEMPT_CLASSES or not policy["mute_declined_proposals"]:
         return
     muted = _class_muted(c, klass, instance_key)
     if muted is not None:

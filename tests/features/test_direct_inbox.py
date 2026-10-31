@@ -411,3 +411,31 @@ def test_a_reply_by_the_operator_ends_the_decline_hold():
                            now=NOW + timedelta(hours=3))
     assert report["proposed"] == 1
     assert len(_proposals()) == 2
+
+
+def test_a_follow_up_class_the_operator_kept_declining_still_opens_a_task():
+    for i in range(work_store.MUTE_WINDOW):
+        item_id = work_store.create_proposal(
+            f"Follow up with Si Fokon on email: answer message {i}",
+            instance_key="personal", contexts="personal,followup")
+        work_store.apply_action(item_id, "decline")
+    report, _, _, _ = _run(emails=[_email()])
+    assert report["proposed"] == 1
+    assert report["refused"] == 0
+
+
+def test_a_refused_task_is_reported_once_and_its_verdict_waits():
+    refusal = work_store.ProposalSuppressed(work_store.PROPOSAL_CLASS_MUTED_EVENT,
+                                            "proposal class follow_up_person is muted")
+    with patch.object(work_store, "_refuse_proposal", side_effect=refusal):
+        report, _, _, _ = _run(emails=[_email()])
+        again, _, _, _ = _run(emails=[], now=NOW + timedelta(hours=1))
+    assert report["refused"] == 1 and report["proposed"] == 0
+    assert again["refused"] == 1
+    events = db.query_all("SELECT * FROM log_events WHERE event = ?",
+                          (di.REFUSED_EVENT,))
+    assert len(events) == 1
+    assert "refused the task" in events[0]["summary"]
+    assert json.loads(events[0]["meta"])["rule"] == work_store.PROPOSAL_CLASS_MUTED_EVENT
+    [row] = db.query_all("SELECT work_item_id FROM direct_followups")
+    assert row["work_item_id"] is None

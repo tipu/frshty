@@ -37,6 +37,7 @@ from services import work_launch, work_store
 
 STATE_MODULE = "direct_inbox"
 FOLLOWUP_TAG = "followup"
+REFUSED_EVENT = "direct_followup_refused"
 EMAIL = "email"
 TEXT = "text"
 DEFAULT_INTERVAL_MINUTES = 30
@@ -589,11 +590,35 @@ _WAITING = (
     " ORDER BY d.last_at, d.id")
 
 
-def _open_tasks(instance_key: str, now: datetime, max_pending: int) -> list[dict]:
+def _report_refused(conn, instance_key: str, row, e: work_store.ProposalSuppressed) -> None:
+    """Emit one event for a verdict whose task the board refused, once per
+    verdict every work_store.SUPPRESSED_EVENT_QUIET_HOURS, so a verdict that
+    stays unmarked does not wait without a word on the feed."""
+    since = _iso(_now() - timedelta(hours=work_store.SUPPRESSED_EVENT_QUIET_HOURS))
+    if conn.execute(
+            "SELECT 1 FROM log_events WHERE event = ?"
+            " AND json_extract(meta, '$.followup_id') = ? AND ts >= ? LIMIT 1",
+            (REFUSED_EVENT, row["id"], since)).fetchone() is not None:
+        return
+    log.emit(REFUSED_EVENT,
+             f"[{instance_key}] {row['who']} is waiting on a"
+             f" {CHANNELS.get(row['source'], row['source'])} reply; the board"
+             f" refused the task: {e}",
+             meta={"followup_id": row["id"], "source": row["source"],
+                   "thread_key": row["thread_key"], "rule": e.event,
+                   "held_by": e.holder.get("id")},
+             conn=conn)
+
+
+def _open_tasks(instance_key: str, now: datetime,
+                max_pending: int) -> tuple[list[dict], list[dict]]:
     """Open a task for the newest verdict of every conversation that waits on
     the operator. The check, the task and the mark on the verdict are one
-    transaction, so two scans cannot open two tasks for one message."""
+    transaction, so two scans cannot open two tasks for one message. A
+    verdict whose task the board refuses stays unmarked, is reported by
+    _report_refused, and comes back as refused."""
     opened = []
+    refused = []
     for index, row in enumerate(db.query_all(_WAITING, (instance_key,))):
         stamp = _iso(now + timedelta(microseconds=index))
         channel = CHANNELS.get(row["source"], row["source"])
@@ -623,7 +648,10 @@ def _open_tasks(instance_key: str, now: datetime, max_pending: int) -> list[dict
                     contexts=",".join(tag for tag in (instance_key, FOLLOWUP_TAG) if tag),
                     cwd=_cwd_for(instance_key), brief=brief, conn=c, now=stamp,
                     decline_hold=False)
-            except work_store.ProposalSuppressed:
+            except work_store.ProposalSuppressed as e:
+                _report_refused(c, instance_key, row, e)
+                refused.append({"followup_id": row["id"], "thread_key": row["thread_key"],
+                                "rule": e.event})
                 continue
             c.execute("UPDATE direct_followups SET work_item_id = ? WHERE id = ?",
                       (item_id, row["id"]))
@@ -634,7 +662,7 @@ def _open_tasks(instance_key: str, now: datetime, max_pending: int) -> list[dict
                  meta={"work_item_id": item_id, "source": row["source"],
                        "thread_key": row["thread_key"]})
         opened.append({"work_item_id": item_id, "thread_key": row["thread_key"]})
-    return opened
+    return opened, refused
 
 
 def check(config: dict, instance_key: str = "", now: datetime | None = None) -> dict:
@@ -666,7 +694,8 @@ def check(config: dict, instance_key: str = "", now: datetime | None = None) -> 
         if error:
             report["errors"].append(error)
         _record(conversations, instance_key, now + timedelta(milliseconds=offset))
-    opened = _open_tasks(instance_key, now,
-                         _int(settings, "max_pending", DEFAULT_MAX_PENDING))
+    opened, refused = _open_tasks(instance_key, now,
+                                  _int(settings, "max_pending", DEFAULT_MAX_PENDING))
     report["proposed"] = len(opened)
+    report["refused"] = len(refused)
     return report
