@@ -21,6 +21,10 @@ def _result(tool_id, text, is_error=False):
         {"type": "tool_result", "tool_use_id": tool_id, "is_error": is_error, "content": text}]}})
 
 
+_OLD_NOTICE = ("[LSP gate] The grep for `baz` in this command did not run; the rest of the "
+               "command ran. Make your next tool call LSP.")
+
+
 def _denied(tool_id, name="foo"):
     return _result(tool_id, "PreToolUse:Bash hook error: " + gate.DENY_REASON.format(name=name), True)
 
@@ -33,8 +37,8 @@ def test_each_refusal_is_classed_by_the_next_call_past_a_tool_search(tmp_path):
         _use("c", "LSP", {"operation": "workspaceSymbol", "query": "foo"}), _result("c", "x"),
         _use("d", "Bash", {"command": 'grep -n "def bar" a.py'}), _denied("d", "bar"),
         _use("e", "Bash", {"command": 'grep -n "bar" a.py'}), _result("e", "1:bar"),
-        _use("f", "Bash", {"command": "ls; " + gate.REMOVED_NOTICE.format(name="baz")}),
-        _result("f", "a.py\n" + gate.REMOVED_NOTICE.format(name="baz")),
+        _use("f", "Bash", {"command": "ls; echo '" + _OLD_NOTICE + "'"}),
+        _result("f", "a.py\n" + _OLD_NOTICE),
         _use("g", "Read", {"file_path": "a.py"}), _result("g", "x"),
         _use("h", "Grep", {"pattern": "def qux"}), _denied("h", "qux"),
     ]) + "\n")
