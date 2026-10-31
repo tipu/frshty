@@ -110,6 +110,15 @@ def pr_worktree_gc(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts=pr_worktree_gc.sweep(ctx.config))
 
 
+@task("tmp_gc", timeout=600)
+def tmp_gc(ctx: TaskContext) -> TaskResult:
+    from features import tmp_gc
+    result = tmp_gc.sweep(ctx.config)
+    if result.get("stopped"):
+        return TaskResult("failed", f"cannot read {result['stopped']}", artifacts=result)
+    return TaskResult("ok", artifacts=result)
+
+
 @task("log_retention", timeout=1800)
 def log_retention(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts=log.prune())
