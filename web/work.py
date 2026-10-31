@@ -12,8 +12,9 @@ import core.db as db
 import core.log as log
 import core.state as state
 import core.terminal as terminal
-from services import (disk_usage, work_artifacts, work_debrief, work_launch,
-                      work_peers, work_store, work_tickets, work_worktree)
+from services import (disk_usage, work_artifacts, work_debrief, work_explain,
+                      work_launch, work_peers, work_store, work_tickets,
+                      work_worktree)
 from web.pages import _template
 from web.sandbox import origin_is_opaque, policy_for
 from web.tickets import schedule_discuss_kill
@@ -100,9 +101,11 @@ async def api_work_peer_post(key: str, path: str, request: Request,
                              body: dict | None = Body(default=None)):
     if not work_launch.board_admin():
         return JSONResponse({"error": NOT_ADMIN}, status_code=403)
+    timeout = (work_explain.EXPLAIN_TIMEOUT + work_peers.DEFAULT_TIMEOUT
+               if path.endswith("/explain") else work_peers.DEFAULT_TIMEOUT)
     status, payload = await work_peers.request(key, "POST", path,
                                                params=dict(request.query_params),
-                                               body=body or {})
+                                               body=body or {}, timeout=timeout)
     return JSONResponse(payload, status_code=status)
 
 
@@ -688,6 +691,22 @@ def api_followup_send(followup_id: int, body: dict):
                                         images=body.get("images"))
     if "error" in result:
         return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.post("/api/work/followups/{followup_id}/explain")
+def api_followup_explain(followup_id: int):
+    result = work_explain.explain_followup(followup_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404 if result["error"] == "unknown followup" else 502)
+    return result
+
+
+@router.post("/api/work/items/{item_id}/explain")
+def api_work_explain(item_id: int):
+    result = work_explain.explain_item(item_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404 if result["error"] == "unknown work item" else 502)
     return result
 
 

@@ -194,6 +194,9 @@
               <template v-if="g === 'proposed'">
                 <button class="ln-btn ln-btn-sm ln-btn-primary" :disabled="approveBusy[rowKey(it)]"
                         title="start an agent on this proposal" @click="approve(it)">Approve &amp; launch</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" :disabled="explainBusy[rowKey(it)]"
+                        title="break down in plain words why frshty proposed this and what the run does"
+                        @click="explain(it)">{{ explainBusy[rowKey(it)] ? 'Explaining…' : (explainText[rowKey(it)] ? 'Explain ▾' : 'Explain ▸') }}</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="frshty was wrong; file it without running it" @click="act(it, 'decline')">Decline</button>
               </template>
@@ -245,6 +248,7 @@
             </span>
           </div>
           <div class="wsum" v-if="it.summary && sumOpen[rowKey(it)]" v-html="lkFor(it, it.summary)"></div>
+          <div class="wsum" v-if="explainText[rowKey(it)]">{{ explainText[rowKey(it)] }}</div>
           <form style="margin-top:8px" v-if="canFollowUp(g) && fupOpen[rowKey(it)]" @submit.prevent="launchFollowup(it)">
             <textarea class="wintake" rows="1" :ref="el => setFupBox(rowKey(it), el)"
                       v-model="fupText[rowKey(it)]" :disabled="fupBusy[rowKey(it)]"
@@ -347,7 +351,7 @@ frshtyApp({
       intakeTray: PasteImages.tray(), fupTray: {},
       intakeAgent: localStorage.getItem("workAgent") || "claude",
       diskReports: {},
-      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, linkmap: null, threads: [], todos: [], todoText: "", todoError: "",
+      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, explainText: {}, explainBusy: {}, linkmap: null, threads: [], todos: [], todoText: "", todoError: "",
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
@@ -820,6 +824,22 @@ frshtyApp({
         this.intakeError = "request failed: " + e.message + " — is frshty up?";
       } finally {
         this.intakeBusy = false;
+      }
+    },
+    async explain(it) {
+      const key = this.rowKey(it);
+      if (this.explainBusy[key]) return;
+      if (this.explainText[key]) { delete this.explainText[key]; return; }
+      this.explainBusy[key] = true;
+      try {
+        const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/explain`), { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) this.connError = d.error || ("explain failed HTTP " + r.status);
+        else this.explainText[key] = d.text;
+      } catch (e) {
+        this.connError = "explain failed: " + e.message;
+      } finally {
+        delete this.explainBusy[key];
       }
     },
     async approve(it) {
