@@ -11,6 +11,8 @@ from pathlib import Path
 
 import core.log as log
 
+_PLATFORM_FEATURES = ("tickets", "review_prs", "own_prs", "pr_autofix", "presentations")
+
 
 def _run(cmd: list[str], timeout: int = 15,
          env: dict | None = None) -> subprocess.CompletedProcess:
@@ -126,7 +128,11 @@ def preflight_instance(config: dict) -> tuple[bool, list[dict]]:
         account = gh_cfg.get("account") or ""
         repos = [raw] if isinstance(raw, str) else list(raw)
         repos = [r for r in repos if r]
-        if not repos:
+        ws = config.get("workspace") or {}
+        features = config.get("features") or {}
+        needs_repo = (bool(ws.get("repos") or ws.get("projects_dir"))
+                      or any(features.get(f) for f in _PLATFORM_FEATURES))
+        if not repos and needs_repo:
             checks.append({"name": "github.repo", "ok": False, "detail": "not configured"})
         for repo in repos:
             ok, reason = gh_repo_push_ok(repo, account)
