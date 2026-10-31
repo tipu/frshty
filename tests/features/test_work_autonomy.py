@@ -1008,6 +1008,31 @@ class TestRunBudget:
         self._turn_events(item_id, sid, [("Stop", 300), ("auto_continued", 300)])
         assert self._actions(item_id) == ["budget_spent"]
 
+    def test_an_idle_notification_closes_a_turn(self, monkeypatch):
+        item_id, sid, _ = self._working_run(monkeypatch, 600)
+        run = db.query_one("SELECT id FROM work_runs WHERE session_id = ?", (sid,))
+        now = datetime.now(timezone.utc)
+        with db.tx() as c:
+            for kind, payload, minutes_ago in [
+                    ("Notification", {"message": "Claude needs your permission to use Bash"}, 590),
+                    ("Notification", {"message": "Claude is waiting for your input"}, 560),
+                    ("UserPromptSubmit", {}, 5)]:
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (item_id, run["id"], kind, json.dumps(payload),
+                     (now - timedelta(minutes=minutes_ago)).isoformat()))
+            assert 44 <= work_store._budget_minutes(
+                c, {"id": run["id"]}, (now - timedelta(minutes=600)).isoformat(), now) <= 46
+
+    def test_a_turn_typed_in_the_terminal_still_counts(self, monkeypatch):
+        item_id, sid, _ = self._working_run(monkeypatch, 310)
+        self._turn_events(item_id, sid, [("Stop", 300), ("Stop", 0)])
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        assert work_store.maybe_autocontinue(sid, "", tail="still working") == "continued"
+        assert _events(item_id, "budget_spent")
+
     def test_a_stopped_decision_is_not_retried_every_scan(self, monkeypatch):
         item_id, sid, _ = self._working_run(monkeypatch, work_store.RUN_BUDGET_MINUTES)
         assert self._actions(item_id) == ["budget_spent"]
