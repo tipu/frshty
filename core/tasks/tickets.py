@@ -70,6 +70,13 @@ def _run_pipeline_agent(prompt: str, rules_files: list[Path] | None = None, **kw
     return run_claude_code(f"{prompt}\n\n{NO_PUBLISH_RULE}", **kwargs)
 
 
+def _report_stage_end(event: str, what: str):
+    def hook(ctx: TaskContext, result: TaskResult) -> None:
+        log.emit(event, f"{what} finished for {ctx.ticket_key}",
+                 meta={"ticket": ctx.ticket_key})
+    return hook
+
+
 def _testing_md_is_substantive(path: Path) -> bool:
     """True iff TESTING.md exists, is a file, and has >= MIN_TESTING_MD_BYTES
     of non-whitespace content."""
@@ -1515,6 +1522,7 @@ Cite file:line evidence for every claim. Do not modify any source file.
 @task("start_reviewing",
       preconditions=[status_is("reviewing"), file_exists("docs/change-manifest.md")],
       postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*(PASS|FAIL)")],
+      on_success=_report_stage_end("ticket_review_complete", "Tri-review"),
       timeout=REVIEW_TIMEOUT)
 def start_reviewing(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
@@ -1578,6 +1586,7 @@ Output only the file docs/FLOW.html. Do NOT modify any source code or other docs
 @task("generate_flow_doc",
       preconditions=[status_is("reviewing"), file_exists("docs/change-manifest.md")],
       postconditions=[file_exists("docs/FLOW.html")],
+      on_success=_report_stage_end("ticket_flow_doc_complete", "FLOW.html build"),
       timeout=FLOW_TIMEOUT)
 def generate_flow_doc(ctx: TaskContext) -> TaskResult:
     """Render docs/FLOW.html: a self-contained interactive walkthrough of the
@@ -1815,6 +1824,7 @@ BACKFILL_TIMEOUT = 2400
 
 @task("backfill_artifacts",
       postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*(PASS|FAIL)")],
+      on_success=_report_stage_end("ticket_backfill_complete", "Artifact backfill"),
       timeout=BACKFILL_TIMEOUT)
 def backfill_artifacts(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
@@ -1867,6 +1877,7 @@ def enter_testing(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("testing"),
                      file_exists("docs/change-manifest.md")],
       postconditions=[file_exists("docs/test-plan.md")],
+      on_success=_report_stage_end("ticket_test_planning_complete", "Headless plan_tests"),
       timeout=TEST_PLAN_TIMEOUT)
 def plan_tests(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
@@ -1923,6 +1934,7 @@ def _render_testing_md_section(path: Path) -> str:
       preconditions=[status_is("testing"),
                      file_exists("docs/test-plan.md")],
       postconditions=[file_exists("docs/test-files-written.txt")],
+      on_success=_report_stage_end("ticket_test_writing_complete", "Headless write_tests"),
       timeout=TEST_WRITE_TIMEOUT + COMMIT_PHASE_TIMEOUT)
 def write_tests(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
@@ -2068,6 +2080,8 @@ def _fire_ticket_dev_complete(ctx: TaskContext) -> None:
         "slug": ts.get("slug", ""),
         "branch": ts.get("branch", ""),
     }, ctx.config)
+    log.emit("ticket_dev_complete", f"{ctx.ticket_key} is ready for a PR",
+             meta={"ticket": ctx.ticket_key})
 
 
 @task("enter_proving",
@@ -2121,6 +2135,7 @@ def _record_proof_fingerprint(ctx: TaskContext) -> None:
 @task("prove",
       preconditions=[status_is("proving")],
       postconditions=[file_exists("docs/proof.md")],
+      on_success=_report_stage_end("ticket_prove_complete", "Headless prove"),
       timeout=PROOF_TIMEOUT)
 def prove(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)

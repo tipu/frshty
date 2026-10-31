@@ -23,7 +23,8 @@ def peers_file(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    monkeypatch.setattr(work_routes.work_launch, "board_admin", lambda: True)
     app = FastAPI()
     app.include_router(work_routes.router)
     return TestClient(app)
@@ -260,6 +261,33 @@ class TestPeerRoutes:
         resp = client.get("/api/work/items")
         assert resp.status_code == 200
         assert "groups" in resp.json()
+
+
+class TestNonAdminBoard:
+    def test_lists_no_peer(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        monkeypatch.setattr(work_routes.work_launch, "board_admin", lambda: False)
+        resp = client.get("/api/work/peers")
+        assert resp.status_code == 200
+        assert resp.json() == {"peers": []}
+
+    def test_proxy_routes_refuse(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        calls = _stub_httpx(monkeypatch, _StubResponse(payload={"counts": {}}))
+        monkeypatch.setattr(work_routes.work_launch, "board_admin", lambda: False)
+        assert client.get("/api/work/peers/a/api/work/items").status_code == 403
+        assert client.post("/api/work/peers/a/api/work/intake", json={}).status_code == 403
+        assert client.get("/api/work/peers/a/api/work/artifact_file/x/index.html").status_code == 403
+        assert calls == []
+
+    def test_terminal_proxy_refuses(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        monkeypatch.setattr(work_routes.work_launch, "board_admin", lambda: False)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws/peers/a/terminal/artifact-7"):
+                pass
+        assert exc.value.code == 1008
+        assert exc.value.reason == work_routes.NOT_ADMIN
 
 
 class _PeerStream(httpx.AsyncByteStream):

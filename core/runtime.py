@@ -95,8 +95,8 @@ def _is_quiet_now(config: dict, now_local: datetime) -> bool:
 
 
 def _slack_watched(config: dict) -> bool:
-    return bool((config.get("features") or {}).get("slack")) and bool(
-        _watched_capture(config))
+    return bool((config.get("features") or {}).get("slack")) and any(
+        _watched_capture(view) for view in slack_capture.workspace_configs(config))
 
 
 def _slack_conversations():
@@ -253,19 +253,22 @@ def _emit_slack_tick(instance_key: str, config: dict, marks: dict,
         return
     if _is_quiet_now(config, now_local):
         return
-    path = _watched_capture(config)
-    if not path:
-        return
-    mark = _capture_mark(path)
-    pulse, windows = _slack_pulse(mark, marks.get(instance_key),
-                                  pending.get(instance_key, []),
-                                  _slack_conversations().settle_seconds(config),
-                                  now_ts)
-    marks[instance_key] = mark
-    if windows:
-        pending[instance_key] = windows
-    else:
-        pending.pop(instance_key, None)
+    pulse = False
+    for view in slack_capture.workspace_configs(config):
+        path = _watched_capture(view)
+        if not path:
+            continue
+        key = f"{instance_key}:{slack_capture.scope(view)}" if slack_capture.scope(view) else instance_key
+        mark = _capture_mark(path)
+        fired, windows = _slack_pulse(mark, marks.get(key), pending.get(key, []),
+                                      _slack_conversations().settle_seconds(view),
+                                      now_ts)
+        marks[key] = mark
+        if windows:
+            pending[key] = windows
+        else:
+            pending.pop(key, None)
+        pulse = pulse or fired
     if pulse:
         q.emit_event(source="slack_watch", kind="slack_tick",
                      payload={"at": datetime.now(timezone.utc).isoformat()},
@@ -622,7 +625,10 @@ def _clock(value: str, fallback: str) -> tuple[int, int]:
 def drain_and_exit(timeout: float = drain.DRAIN_SECONDS) -> None:
     """Stop claiming jobs, wait up to timeout seconds for the live jobs to
     finish, and then send SIGTERM to this process so uvicorn shuts down. The
-    board keeps answering while the jobs drain. A second call returns at once."""
+    board keeps answering while the jobs drain. A process still alive
+    drain.EXIT_GRACE seconds after the SIGTERM exits with os._exit, because
+    uvicorn waits without limit for a request task that never ends. A second
+    call returns at once."""
     if not _drain_lock.acquire(blocking=False):
         return
     log.emit("drain_started", f"stop claiming jobs; wait up to {timeout:.0f}s for live jobs")
@@ -634,6 +640,10 @@ def drain_and_exit(timeout: float = drain.DRAIN_SECONDS) -> None:
     else:
         log.emit("drain_finished", "no live jobs; exiting")
     os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(drain.EXIT_GRACE)
+    log.emit("drain_exit_forced",
+             f"server still running {drain.EXIT_GRACE:.0f}s after SIGTERM; exiting hard")
+    os._exit(1)
 
 
 def install_drain_handler() -> None:

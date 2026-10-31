@@ -6,6 +6,7 @@ built from the capture and what decides whether a proposal is opened, never
 that a real model answered."""
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -4393,3 +4394,60 @@ def test_learning_a_channel_reopens_what_it_can_now_be_context_for(tmp_path):
     row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
                        (RUN_THIRD_TS,))
     assert row["judged_ts"] == "" and sc._is_candidate(row, config, NOW, OPERATOR)
+
+
+def test_each_listed_workspace_reads_its_own_capture_and_its_own_candidates(tmp_path):
+    """An instance that lists [[slack.workspaces]] reads one capture per entry.
+    Each entry has its own operator id, its own read position and its own
+    candidates, so a conversation of one workspace is never judged against
+    the operator id of another."""
+    for name in ("north", "south"):
+        folder = tmp_path / name
+        folder.mkdir()
+        with open(folder / "messages.jsonl", "w") as f:
+            f.write(json.dumps(_ws("1788458400.000100", ROS, f"{name} needs a hand", channel=DM)) + "\n")
+    config = {"job": {"key": "astroco"}, "features": {"slack": True},
+              "_base_url": "http://localhost:7100",
+              "slack": {"propose_tasks": True, "workspaces": [
+                  {"workspace": "north", "messages_dir": str(tmp_path / "north"), "user_id": "U0NORTH"},
+                  {"workspace": "south", "messages_dir": str(tmp_path / "south"), "user_id": "U0SOUTH"}]}}
+    views = sc.slack_capture.workspace_configs(config)
+    assert [sc._operator_id(v) for v in views] == ["U0NORTH", "U0SOUTH"]
+    for view in views:
+        sc.ingest(view, instance_key="astroco", now=NOW)
+
+    assert sorted(r["workspace"] for r in _conversations()) == ["north", "south"]
+    for view, name in zip(views, ("north", "south")):
+        assert [r["workspace"] for r in sc._candidates("astroco", view, NOW)] == [name]
+        assert state.load(f"{sc.STATE_MODULE}:{name}")["files"]
+    assert not state.load(sc.STATE_MODULE)
+
+
+def test_a_listed_workspace_needs_a_name_of_its_own(tmp_path):
+    path = tmp_path / "astroco.toml"
+    path.write_text('[job]\nkey = "astroco"\nport = 7100\n[workspace]\nroot = "/tmp"\n'
+                    '[[slack.workspaces]]\nworkspace = "north"\nmessages_dir = "~/north"\n'
+                    '[[slack.workspaces]]\nworkspace = "north"\nmessages_dir = "~/south"\n')
+    with pytest.raises(ValueError):
+        cfg.load_config(str(path))
+    path.write_text(path.read_text().replace('"north"\nmessages_dir = "~/south"',
+                                             '"south"\nmessages_dir = "~/south"'))
+    entries = cfg.load_config(str(path))["slack"]["workspaces"]
+    assert [e["raw_path"] for e in entries] == [
+        str(Path("~/north/messages.jsonl").expanduser()),
+        str(Path("~/south/messages.jsonl").expanduser())]
+
+
+def test_the_slack_page_keeps_each_listed_workspace_apart(tmp_path):
+    """Two workspaces can both hold a #general digest and, rarely, a reply
+    context under the same ts. The page keeps the digests apart, and a reply
+    that names more than one workspace is refused rather than sent to the
+    wrong one."""
+    from web import slack as page
+    config = {"slack": {"workspaces": [{"workspace": "north"}, {"workspace": "south"}]}}
+    for name in ("north", "south"):
+        state.save(f"slack:{name}", {"channel_digests": {"#general": {"updated_at": name}},
+                                     "replies": {"1.1": {"workspace": name, "channel": "C1"}}})
+    with patch.object(page, "_config", config):
+        assert set(page.api_slack_data()["channel_digests"]) == {"north #general", "south #general"}
+        assert page.api_slack_send("1.1", {"text": "hi"}).status_code == 409
