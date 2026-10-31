@@ -494,6 +494,35 @@ def review_checkout_args(cwd) -> list[str]:
     return args
 
 
+def codex_review_checkout_args(cwd) -> list[str]:
+    """The flags a codex run needs when its working directory is a pull
+    request checkout, [] for any other directory.
+
+    codex loads .codex/config.toml from its project root down to its working
+    directory, and an [mcp_servers] entry there starts a command at session
+    start, even under --dangerously-bypass-approvals-and-sandbox and with no
+    trust entry for the folder. codex has no flag that skips project config.
+    It skips the project layers only when the project root is marked
+    untrusted, and the mark must name the root itself: a mark on a parent
+    folder does not cover it. The project root is the nearest folder with a
+    .git, so every ancestor of the working directory, as given and resolved,
+    is marked. The override must be an inline table: codex splits a dotted
+    -c key on every dot and keeps the quotes of a quoted path segment."""
+    if not cwd or not review_checkout(cwd):
+        return []
+    dirs = sorted({str(d) for base in (Path(cwd).absolute(), Path(cwd).resolve())
+                   for d in (base, *base.parents)})
+    table = ", ".join(f'{json.dumps(d, ensure_ascii=False)} = {{ trust_level = "untrusted" }}' for d in dirs)
+    return ["-c", f"projects = {{ {table} }}"]
+
+
+def _with_codex_review_args(cmd: list[str], cwd) -> list[str]:
+    if Path(cmd[0]).name != "codex" or "exec" not in cmd:
+        return cmd
+    at = cmd.index("exec") + 1
+    return [*cmd[:at], *codex_review_checkout_args(cwd), *cmd[at:]]
+
+
 def _denied_tools_args(denied_tools: tuple[str, ...] | list[str] | None) -> list[str]:
     """A `claude -p` run keeps its process alive until a scheduled wakeup
     fires, so every headless run denies HEADLESS_DENIED_TOOLS on top of the
@@ -1186,6 +1215,9 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
     logging as Claude. Returns (text, exit_code); both are None when the CLI
     times out or cannot be started at all.
 
+    A `codex exec` run whose cwd is a pull request checkout gets the flags of
+    codex_review_checkout_args.
+
     `output_schema` is for `codex exec` only: it is written to a file and
     passed as --output-schema, and the caller reads the answer with
     parse_structured.
@@ -1209,6 +1241,7 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                 fn_name=fn_name, model=model, prompt=prompt, cwd=cwd, timeout=timeout,
                 env_extra=env_extra, last_message_file=last_message_file,
                 transcript_file=transcript_file, stdin_text=stdin_text)
+    cmd = _with_codex_review_args(cmd, cwd)
     inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
     t0 = time.monotonic()
     env = {**os.environ, **(env_extra or {})}
