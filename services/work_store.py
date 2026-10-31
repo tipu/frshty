@@ -28,7 +28,8 @@ MISSED_DECISION_AFTER_MINUTES = 3
 RUN_CHECK_IN_MINUTES = 73
 RUN_BUDGET_MINUTES = 240
 BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
-BG_WAIT_RECHECK_HOURS = 2
+BG_WAIT_RECHECK_MINUTES = 30
+BG_WAIT_REASON = "Waiting on a background task"
 CI_WAIT_RECHECK_HOURS = 6
 CI_WAIT_RE = re.compile(r"\bwaiting on PR #(\d+) checks\b", re.IGNORECASE)
 PROPOSED_STATE = "proposed"
@@ -111,6 +112,14 @@ CHECK_IN_PROMPT = (
     "remains, and how many more minutes you need. If the rest does not fit in "
     "the budget, cut scope: ship the part that works and file the rest as a "
     "follow-up. Then continue."
+)
+BG_WAIT_NUDGE_PROMPT = (
+    "The board has waited {minutes} minutes for your background task to "
+    "report, and no task notification arrived. Still pending: {tasks}. Check "
+    "each one now. A wait loop that matches its own command line, or a task "
+    "whose process is gone, never reports, so stop it and continue the task "
+    "from what you have. If a task still does useful work, end your turn "
+    "again and the board waits once more."
 )
 BUDGET_SPENT_PROMPT = (
     f"The wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours for this run "
@@ -383,6 +392,31 @@ def permission_dialog_closed(lines: list[str]) -> bool:
             and not any(_DIALOG_FOOTER in ln for ln in lines))
 
 
+def clear_closed_permission(session_id: str) -> bool:
+    """Take a held permission question off the board once its dialog is gone.
+
+    A dialog answered in the pane, or one Claude Code denies on its own
+    timeout, sends no event. The agent then keeps calling tools, and the
+    question stayed on the board until the turn ended. Each tool call checks
+    the pane, and a pane without the dialog clears the question.
+
+    Returns whether a question was cleared."""
+    held = db.query_one(
+        "SELECT r.tmux_key, i.id, i.pending_question FROM work_runs r "
+        "JOIN work_items i ON i.id = r.work_item_id WHERE r.session_id = ?", (session_id,))
+    if not held or _permission_keys(held["pending_question"]) is None:
+        return False
+    if not permission_dialog_closed(_capture_pane(f"term-{held['tmux_key']}")):
+        return False
+    with db.tx() as c:
+        return bool(c.execute(
+            "UPDATE work_items SET pending_question = '', "
+            "state = CASE WHEN state = 'needs_you' THEN 'agent_working' ELSE state END, "
+            "stop_reason = CASE WHEN state = 'needs_you' THEN '' ELSE stop_reason END, "
+            "updated_at = ? WHERE id = ? AND pending_question = ?",
+            (_now(), held["id"], held["pending_question"])).rowcount)
+
+
 def _shows_held_dialog(tmux_key: str, pending: str) -> bool:
     """Whether the pane shows the dialog the held question was read from."""
     dialog = permission_dialog(_capture_pane(f"term-{tmux_key}"))
@@ -435,6 +469,7 @@ class ProposalKeyHeld(Exception):
 DECLINE_HOLD_DAYS = 7
 MUTE_WINDOW = 20
 MUTE_DECLINED_SHARE = 0.8
+MUTE_DAYS = 7
 PROPOSAL_DECLINE_HELD_EVENT = "proposal_decline_held"
 PROPOSAL_CLIENT_PR_SKIPPED_EVENT = "proposal_client_pr_skipped"
 PROPOSAL_CLASS_MUTED_EVENT = "proposal_class_muted"
@@ -450,6 +485,7 @@ _PROPOSAL_CLASSES = (
     ("health_doctor", re.compile(r"^(?:\[[^\]]*\]|doctor\b|restore\b)", re.IGNORECASE), False),
 )
 CLIENT_PR_CLASSES = ("merge_pr", "review_pr")
+MUTE_EXEMPT_CLASSES = ("follow_up_person",)
 
 
 class ProposalSuppressed(ProposalKeyHeld):
@@ -477,8 +513,8 @@ def proposal_class(objective: str | None) -> str:
     pull request, and the objective has to name one. follow_up_person is the
     "Follow up with <person>" card the inboxes file, and health_doctor is a
     "Doctor ..." or "Restore ..." card or one global_watch filed, which tags
-    the instance in brackets. Everything else is OTHER_CLASS, which is never
-    muted."""
+    the instance in brackets. Everything else is OTHER_CLASS. OTHER_CLASS and
+    the MUTE_EXEMPT_CLASSES are never muted."""
     text = " ".join((objective or "").split())
     for name, pattern, needs_pr in _PROPOSAL_CLASSES:
         if pattern.search(text) and (not needs_pr or _PR_REF_RE.search(text)):
@@ -514,9 +550,13 @@ def _class_muted(c, klass: str, instance_key: str | None) -> dict | None:
     more than MUTE_DECLINED_SHARE of its last MUTE_WINDOW decided proposals on
     this instance, else None. A class with fewer than MUTE_WINDOW decided
     proposals is never muted. A proposal still waiting is not decided, and
-    one a newer debrief withdrew was never the operator's call."""
+    one a newer debrief withdrew was never the operator's call. The mute
+    lifts MUTE_DAYS after the newest decline: a muted class files nothing,
+    so its window never changes, and the next proposal it files after the
+    mute lifts is a fresh decision that renews or ends the mute."""
     rows = c.execute(
-        "SELECT id, state, stop_reason, objective FROM work_items WHERE scope='proposal'"
+        "SELECT id, state, stop_reason, objective, archived_at FROM work_items"
+        " WHERE scope='proposal'"
         " AND instance_key IS ? AND state != ? AND COALESCE(stop_reason, '') != ?"
         " ORDER BY id DESC",
         (instance_key, PROPOSED_STATE, SUPERSEDED_REASON))
@@ -532,7 +572,10 @@ def _class_muted(c, klass: str, instance_key: str | None) -> dict | None:
                 if r["state"] == CANCELED_STATE and r["stop_reason"] == DECLINED_REASON]
     if len(declined) <= MUTE_DECLINED_SHARE * MUTE_WINDOW:
         return None
-    newest = declined[0]
+    newest = max(declined, key=lambda r: r["archived_at"] or "")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=MUTE_DAYS)).isoformat()
+    if (newest["archived_at"] or "") < cutoff:
+        return None
     return {"id": newest["id"], "state": newest["state"], "stop_reason": newest["stop_reason"],
             "declined": len(declined)}
 
@@ -547,9 +590,12 @@ def _refuse_proposal(c, objective: str, instance_key: str | None, contexts: str,
     declined conversation by rules of its own passes decline_hold=False. A
     merge or review of a client pull request is not filed unless the board's
     [work] client_pr_proposals says so. A class the operator keeps declining
-    is muted unless [work] mute_declined_proposals is false. work_launch is
-    imported here rather than at the top because work_launch imports this
-    module."""
+    is muted for MUTE_DAYS after its newest decline unless [work]
+    mute_declined_proposals is false. A class in
+    MUTE_EXEMPT_CLASSES is never muted: a declined follow-up mostly means the
+    operator already answered, and a muted class gets no new decisions, so
+    its mute never lifts. work_launch is imported here rather than at the top
+    because work_launch imports this module."""
     from services import work_launch
     holder = (_held_by_decline(c, objective, instance_key, source_item_id)
               if decline_hold else None)
@@ -569,7 +615,7 @@ def _refuse_proposal(c, objective: str, instance_key: str | None, contexts: str,
             PROPOSAL_CLIENT_PR_SKIPPED_EVENT,
             f"a {klass} proposal on a client project ({', '.join(clients)}) is not filed",
             proposal_class=klass)
-    if not policy["mute_declined_proposals"]:
+    if klass in MUTE_EXEMPT_CLASSES or not policy["mute_declined_proposals"]:
         return
     muted = _class_muted(c, klass, instance_key)
     if muted is not None:
@@ -1056,9 +1102,9 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                 elif bg_pending and not pending:
                     item_state = "waiting_external"
                     snooze = (datetime.now(timezone.utc)
-                              + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat()
-                    reason = f"Waiting on a background task: {excerpt[:300]}" if excerpt \
-                        else "Waiting on a background task"
+                              + timedelta(minutes=BG_WAIT_RECHECK_MINUTES)).isoformat()
+                    reason = f"{BG_WAIT_REASON}: {excerpt[:300]}" if excerpt \
+                        else BG_WAIT_REASON
             if kind == "UserPromptSubmit":
                 if item["pending_question"] and is_wakeup_prompt(payload.get("prompt") or ""):
                     c.execute("UPDATE work_items SET updated_at = ? WHERE id = ?",
@@ -1715,7 +1761,8 @@ def record_progress(session_id: str, transcript_path: str,
         ).fetchone()
         if not run:
             return ""
-        item = c.execute("SELECT current_checkpoint FROM work_items WHERE id = ?",
+        item = c.execute("SELECT current_checkpoint, COALESCE(instance_key, '') AS instance_key "
+                         "FROM work_items WHERE id = ?",
                          (run["work_item_id"],)).fetchone()
         if not item or item["current_checkpoint"] == newest:
             return ""
@@ -1732,6 +1779,11 @@ def record_progress(session_id: str, transcript_path: str,
             "VALUES (?, ?, 'progress', ?, ?)",
             (run["work_item_id"], run["id"], db.dump_json({"text": newest}), now),
         )
+        instance_key = item["instance_key"] or BOARD_INSTANCE_KEY
+        with contextlib.redirect_stdout(sys.stderr):
+            log.emit("work_progress", f"work item {run['work_item_id']}: {newest}",
+                     meta={"work_item_id": run["work_item_id"], "session_id": session_id},
+                     job=instance_key, instance_key=instance_key, conn=c)
     return newest
 
 
@@ -2340,9 +2392,9 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, "
                 "stop_reason = ?, updated_at = ? WHERE id = ?",
                 ((datetime.now(timezone.utc)
-                  + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat(),
-                 f"Waiting on a background task: {excerpt}" if excerpt
-                 else "Waiting on a background task", now, run["work_item_id"]),
+                  + timedelta(minutes=BG_WAIT_RECHECK_MINUTES)).isoformat(),
+                 f"{BG_WAIT_REASON}: {excerpt}" if excerpt
+                 else BG_WAIT_REASON, now, run["work_item_id"]),
             )
             _record_stop(c, run, "waiting_external", "a background task is still running", now)
             return "waiting_external"
@@ -2352,7 +2404,8 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the run passed its wall-clock budget of {RUN_BUDGET_MINUTES} "
                          "minutes; an operator reply or a reopen gives a new one", now)
             return "budget_spent"
-        over_budget = _budget_minutes(clock) >= RUN_BUDGET_MINUTES
+        minutes = _budget_minutes(c, run, clock)
+        over_budget = minutes >= RUN_BUDGET_MINUTES
         if not item["autocontinue"]:
             _record_stop(c, run, "disabled", "autocontinue is off for this item", now)
             return "disabled"
@@ -2366,7 +2419,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'budget_spent', ?, ?)",
                 (run["work_item_id"], run["id"],
-                 db.dump_json({"minutes": _budget_minutes(clock)}), now),
+                 db.dump_json({"minutes": minutes}), now),
             )
     sent = tmux_send(run["tmux_key"], BUDGET_SPENT_PROMPT if over_budget
                      else continue_prompt(contexts, run["work_item_id"]))
@@ -2596,7 +2649,10 @@ def retry_missed_autocontinues(cutoff: str) -> list[dict]:
         "AND (SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
         f"AND e.kind IN ({_IDLE_STOP_KINDS_SQL})) > "
         "(SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
-        f"AND e.kind IN ({_DECIDED_KINDS_SQL}))",
+        f"AND (e.kind IN ({_DECIDED_KINDS_SQL}) OR (e.kind = 'autocontinue_stopped' "
+        "AND json_extract(e.payload, '$.outcome') = 'budget_spent' "
+        "AND e.id > (SELECT COALESCE(MAX(b.id), 0) FROM work_events b "
+        f"WHERE b.work_item_id = i.id AND b.kind IN {_BUDGET_RESET_KINDS_SQL}))))",
         (cutoff,),
     )
     actions: list[dict] = []
@@ -2762,9 +2818,55 @@ def _budget_event_since(c, run, kind: str, since: str) -> bool:
         (run["id"], kind, since)).fetchone() is not None
 
 
-def _budget_minutes(clock: str, now: datetime | None = None) -> int:
+_BUDGET_OPEN_KINDS = ("SessionStart", "UserPromptSubmit", "auto_continued", "ci_wait_done",
+                      "operator_reply", "operator_reopen", "run_resumed", "bg_wait_nudged")
+_BUDGET_CLOSE_KINDS = ("Stop", "Notification", "SessionEnd")
+
+
+def _budget_minutes(c, run, clock: str, now: datetime | None = None) -> int:
+    """The minutes the agent spent in its turns since the budget clock started.
+
+    A turn opens with SessionStart or UserPromptSubmit, or with an event the
+    board writes when it sends the agent back to work. It closes with Stop,
+    SessionEnd or the idle Notification, which Claude Code fires instead of
+    Stop when a turn dies on an API error. A codex agent reports no prompt,
+    and an answer typed in its terminal writes no event, so a Stop that
+    arrives with no turn open counts the time since the last close. The time
+    between a closed turn and the next one is a wait on CI, on a background
+    task or on the operator, and no agent works in it. Work item 328 ended a
+    turn on a background wait that never finished, sat 7.5 hours in
+    waiting_external, and on resume the board counted 562 minutes and stopped
+    a run whose turns had used 40. The clock itself opens a turn,
+    because a run starts working and a reply starts a new turn."""
     now_dt = now or datetime.now(timezone.utc)
-    return int((now_dt - datetime.fromisoformat(clock)).total_seconds() // 60)
+    kinds = _BUDGET_OPEN_KINDS + _BUDGET_CLOSE_KINDS
+    rows = c.execute(
+        "SELECT kind, payload, created_at FROM work_events WHERE work_run_id = ? "
+        f"AND created_at > ? AND kind IN ({', '.join('?' * len(kinds))}) ORDER BY id",
+        (run["id"], clock, *kinds)).fetchall()
+    opened: datetime | None = datetime.fromisoformat(clock)
+    closed = opened
+    seconds = 0.0
+    for row in rows:
+        at = datetime.fromisoformat(row["created_at"])
+        if row["kind"] == "Notification":
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except ValueError:
+                payload = {}
+            if not is_idle_stop(row["kind"], payload):
+                continue
+        if row["kind"] in _BUDGET_CLOSE_KINDS:
+            if opened is None and row["kind"] == "Stop":
+                opened = closed
+            if opened is not None:
+                seconds += max(0.0, (at - opened).total_seconds())
+            opened, closed = None, at
+        elif opened is None:
+            opened = at
+    if opened is not None:
+        seconds += max(0.0, (now_dt - opened).total_seconds())
+    return int(seconds // 60)
 
 
 def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
@@ -2796,7 +2898,7 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
             if not current or current["state"] != "agent_working":
                 continue
             clock = _budget_clock(c, run)
-            minutes = _budget_minutes(clock, now_dt)
+            minutes = _budget_minutes(c, run, clock, now_dt)
             if minutes >= RUN_BUDGET_MINUTES:
                 kind, prompt = "budget_spent", BUDGET_SPENT_PROMPT
             elif minutes >= RUN_CHECK_IN_MINUTES:
@@ -2817,6 +2919,64 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
                 (run["work_item_id"], run["id"], kind,
                  db.dump_json({"minutes": minutes}), stamp))
         actions.append({"id": run["work_item_id"], "action": kind, "minutes": minutes})
+    return actions
+
+
+def sweep_background_waits(now: datetime | None = None) -> list[dict]:
+    """Wake an agent whose wait on a background task outlived its snooze.
+
+    A turn that ends on a background task parks the item in waiting_external
+    until the task notification wakes the agent. A task that never reports
+    held the item there for good: on 2026-10-31 a deepseek wait loop matched
+    its own pgrep and kept work 328 idle for seven and a half hours, and the
+    board showed the expired snooze to the operator as needs_you with nothing
+    to answer. This asks the agent to check its pending tasks instead. A run
+    past its wall-clock budget, or one whose agent process is gone, is left
+    for the operator. The event is written after the send, so a send that
+    fails is tried again on the next scan."""
+    now_dt = now or datetime.now(timezone.utc)
+    rows = db.query_all(
+        "SELECT i.id AS work_item_id, i.updated_at, r.id, r.session_id, r.tmux_key, "
+        "r.provider, r.started_at, r.transcript_path, r.cwd, r.agent_session_id "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'waiting_external' AND i.snoozed_until IS NOT NULL "
+        "AND i.snoozed_until <= ? AND i.stop_reason LIKE ?",
+        (now_dt.isoformat(), BG_WAIT_REASON + "%"))
+    actions: list[dict] = []
+    for run in rows:
+        with db.tx() as c:
+            if _budget_minutes(c, run, _budget_clock(c, run), now_dt) >= RUN_BUDGET_MINUTES:
+                continue
+        if not agent_running(run["tmux_key"], run["provider"]):
+            continue
+        tasks = sorted(pending_background_tasks(resolve_transcript_path(run)))
+        minutes = int((now_dt - datetime.fromisoformat(run["updated_at"])).total_seconds() // 60)
+        current = db.query_one("SELECT state, snoozed_until FROM work_items WHERE id = ?",
+                               (run["work_item_id"],))
+        if not current or current["state"] != "waiting_external" \
+                or not current["snoozed_until"] or current["snoozed_until"] > now_dt.isoformat():
+            continue
+        if not tmux_send(run["tmux_key"], BG_WAIT_NUDGE_PROMPT.format(
+                minutes=minutes, tasks=", ".join(tasks) or "none found in the transcript")):
+            log.emit("work_bg_wait_send_failed",
+                     f"work item {run['work_item_id']}: the background-wait check did not "
+                     "reach the agent pane; the next scan tries again")
+            continue
+        stamp = _now()
+        with db.tx() as c:
+            resumed = c.execute(
+                "UPDATE work_items SET state = 'agent_working', snoozed_until = NULL, "
+                "stop_reason = '', updated_at = ? WHERE id = ? AND state = 'waiting_external'",
+                (stamp, run["work_item_id"])).rowcount
+            if resumed:
+                c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'bg_wait_nudged', ?, ?)",
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"minutes": minutes, "tasks": tasks}), stamp))
+        actions.append({"id": run["work_item_id"], "minutes": minutes, "tasks": tasks})
     return actions
 
 

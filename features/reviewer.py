@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import core.log as log
 import core.state as state
 import core.git_util as git_util
+import core.deps as deps
 from core.claude_runner import (run_agentic, run_balanced, run_haiku, extract_json,
                                 parse_structured, strict_object)
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
@@ -1397,9 +1398,15 @@ def _ensure_review_worktree(config, pr) -> Path | None:
             return None
         subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
+        deps.install_worktree_deps(config, pr["repo"], worktree_path, "review_dep_commands")
+        deps.generate_review_prisma(config, pr["repo"], worktree_path)
         return worktree_path
 
-    return git_util.add_detached_worktree(repo_path, worktree_path, pr["branch"])
+    added = git_util.add_detached_worktree(repo_path, worktree_path, pr["branch"])
+    if added:
+        deps.install_worktree_deps(config, pr["repo"], added, "review_dep_commands")
+        deps.generate_review_prisma(config, pr["repo"], added)
+    return added
 
 
 def _load_conventions(config, repo_name) -> str:

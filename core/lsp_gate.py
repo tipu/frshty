@@ -32,13 +32,15 @@ The work-314 scan of 361 denials found that the next tool call was another
 Bash call 160 times and an LSP call only 111 times. 338 of the denied
 commands were compound, such as `sed ...; grep -n "def X" f; sed ...`, and
 115 of the Bash follow-ups ran the rest of the command again, often with
-the grep for X rewritten without `def`. So when a compound command splits
-safely into statements, bash_rewrite replaces only the refused grep with an
-echo of REMOVED_NOTICE and the rest runs; the hook allows the rewritten
-command. Any other refused command is denied with a message that says
-nothing ran and asks for the LSP call first. After a denial or a removal
-for X, every grep that searches for X as a word is refused until an LSP
-lookup names X. About 40 denials were listings such as `grep -n "def test_" f`;
+the grep for X rewritten without `def`. So the deny message says that
+nothing ran and asks for the LSP call first, and after a denial for X every
+grep that searches for X as a word is refused until an LSP lookup names X.
+
+For one day the gate instead removed only the refused grep from a compound
+command, ran the rest and printed a notice. The agents read the notice as
+output and went on: 25 of 111 removals were followed by an LSP call, while
+35 of 53 denials with the message above were. So the gate denies again. A
+notice from that day still counts as a refusal for the repeat rule. About 40 denials were listings such as `grep -n "def test_" f`;
 a prefix (`def test_`, `def test`, `def get_.*`) names no symbol.
 
 workspaceSymbol matches every symbol that contains the query. The work-315
@@ -77,16 +79,6 @@ DENY_REASON = (
     "and this session has not looked up `{name}` with LSP. " + _NEXT_STEP
 )
 
-REMOVED_NOTICE = (
-    "[LSP gate] The grep for `{name}` in this command did not run; the rest "
-    "of the command ran. This session has not looked up `{name}` with LSP. "
-    "Make your next tool call LSP with operation workspaceSymbol, query "
-    "\"{name}\", any file of the project as filePath, line 1 and character "
-    "1. If LSP is not loaded yet, load it first with ToolSearch, query "
-    "\"select:LSP\". Every grep that searches for `{name}` is refused until "
-    "an LSP lookup names `{name}`."
-)
-
 REPEAT_REASON = (
     "Blocked by the LSP gate: this grep searches for `{name}`, and the gate "
     "refused a definition grep for `{name}` earlier in this session. " + _NEXT_STEP
@@ -118,16 +110,6 @@ SHORT_DENY_REASON = (
     "and this session has not looked up `{name}` with LSP. " + _SHORT_NEXT_STEP
 )
 
-SHORT_REMOVED_NOTICE = (
-    "[LSP gate] The grep for `{name}` in this command did not run; the rest "
-    "of the command ran. This session has not looked up `{name}` with LSP. "
-    + _SHORT + "Make your next tool call LSP with operation documentSymbol, "
-    "filePath \"{file}\", line 1 and character 1. If LSP is not loaded yet, "
-    "load it first with ToolSearch, query \"select:LSP\". Every grep of a "
-    "file that searches for `{name}` is refused until an LSP lookup names "
-    "`{name}`."
-)
-
 SHORT_REPEAT_REASON = (
     "Blocked by the LSP gate: this grep searches for `{name}`, and the gate "
     "refused a definition grep for `{name}` earlier in this session. " + _SHORT_NEXT_STEP
@@ -154,16 +136,6 @@ _ALTERNATIVE = re.compile(r"\\?\|")
 _PREFIX = re.compile(r"\.|\*|\+|\[|\\\\?w")
 _REMOVED = re.compile(r"\[LSP gate\] The grep for `([\w$]+)` in this command did not run; "
                       r"the rest of the command ran\.")
-_HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>\s*/dev/null")
-_FILTERS = {"cat", "find", "ls", "head", "tail", "sort", "uniq", "wc", "cut", "sed", "nl", "tr", "column"}
-_EXIT_STATUS = re.compile(r"\b(?:set|exec|eval|source|trap|pipefail|errexit)\b|\$[?{(]|`|>&[3-9]|(?:^|[;&|\n])\s*\.\s")
-_VARIABLE = re.compile(r"\$[\w!#@*_-]")
-_SINGLE_QUOTED = re.compile(r"'[^']*'")
-_GIT_PAGER = re.compile(r"-[A-Za-z]*O.*")
-_SORT_OPTION = re.compile(r"-[a-np-zA-Z0-9]+")
-_RUNS_A_PROGRAM = ("-O", "--open-files-in-pager", "--pre", "--pager", "-delete", "-fprint", "-fls")
-_FIND_ACTIONS = ("-delete", "-exec", "-ok", "-fprint", "-fls")
-_SED_PRINT = re.compile(r"\d+(?:,(?:\d+|\$))?p|\$p")
 _KEYWORDS = {"if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
              "case", "esac", "function", "select", "!", "[[", "time", "coproc"}
 _REFUSED = re.compile(r"(?:PreToolUse:\w+ hook error: )?Blocked by the LSP gate: this grep "
@@ -620,84 +592,3 @@ def _statements(command: str) -> list[tuple[str, str]] | None:
         if words and words[0] in _KEYWORDS:
             return None
     return statements
-
-
-def _stage_reads_only(words: list[str]) -> bool:
-    """Whether one pipeline stage only reads: a search that runs no other
-    program, or a filter from _FILTERS whose every argument is on its
-    allowlist."""
-    rest = [_unquote(w) for w in words if not _ASSIGNMENT.match(w)]
-    if not rest:
-        return False
-    name = _command(rest[0])
-    search = _search_words(words)
-    if search is not None:
-        if name not in _SEARCH_TOOLS | {"git", "xargs", "find"}:
-            return False
-        if any(w.startswith(_RUNS_A_PROGRAM) for w in rest) or \
-                (name == "git" and any(w == "-c" or _GIT_PAGER.fullmatch(w) for w in rest)):
-            return False
-        actions = [w for w in rest if w.startswith(("-exec", "-ok"))]
-        return name != "find" or len(actions) == 1
-    if name not in _FILTERS:
-        return False
-    arguments = rest[1:]
-    if name == "sed":
-        return all(w == "-n" or _SED_PRINT.fullmatch(w) or (not w.startswith("-") and w == arguments[-1]
-                                                             and len(arguments) > 1)
-                   for w in arguments) and any(_SED_PRINT.fullmatch(w) for w in arguments)
-    if name == "find":
-        return not any(w.startswith(_FIND_ACTIONS) for w in arguments)
-    if name in ("sort", "uniq"):
-        return all(_SORT_OPTION.fullmatch(w) for w in arguments)
-    return True
-
-
-def _removable(statement: str) -> bool:
-    """Whether every stage of the pipeline `statement` only reads, so
-    dropping the statement drops nothing but its output. A nested shell, a
-    file write, `tee`, `sort -o` or `sed -i` is not."""
-    text = _HARMLESS_REDIRECT.sub(" ", statement)
-    if ">" in text:
-        return False
-    try:
-        segments = _segments(text)
-    except ValueError:
-        return False
-    return all(_stage_reads_only(words) for words in segments)
-
-
-def bash_rewrite(command: str, transcript_path: str) -> str:
-    """`command` with each refused grep statement replaced by an echo of
-    REMOVED_NOTICE, so the rest of the command runs. "" when the command
-    cannot be split safely, when it holds `set`, `exec`, `eval`, `source`,
-    a shell variable outside single quotes, `$?`, `${`, `$(`, a backtick, a descriptor above 2, pipefail or trap,
-    when a refused statement is followed by `&&` or does
-    more than search and filter, or when nothing but `cd` would be left to
-    run."""
-    statements = _statements(command if isinstance(command, str) else "")
-    if not statements or not transcript_path or _EXIT_STATUS.search(command) or \
-            _VARIABLE.search(_SINGLE_QUOTED.sub("", command)):
-        return ""
-    state = _lsp_lookups(transcript_path)
-    if state is None:
-        return ""
-    parts: list[str] = []
-    removed = kept = 0
-    directory: str | None = ""
-    for text, separator in statements:
-        located, directory = _located(text, directory)
-        kind, name, file = _refusal(located, state)
-        if kind:
-            if separator == "&&" or not _removable(text):
-                return ""
-            removed += 1
-            indent = text[:len(text) - len(text.lstrip())]
-            notice = (SHORT_REMOVED_NOTICE if _short(name) else REMOVED_NOTICE).format(name=name, file=file)
-            parts.append(indent + "echo '" + notice + "'" + separator)
-            continue
-        words = text.split()
-        if words and words[0] != "cd":
-            kept += 1
-        parts.append(text + separator)
-    return "".join(parts) if removed and kept else ""

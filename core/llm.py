@@ -22,6 +22,7 @@ import core.lsp_gate as lsp_gate
 import core.log as log
 import core.state as _state
 from core.job_logs import active_live_log_path, active_live_pid_path
+from core.paths import review_checkout
 from core.state import _instance_key_cv
 
 
@@ -98,6 +99,13 @@ _MIN_PLAN_BYTES = int(os.environ.get("FRSHTY_MIN_PLAN_BYTES", "400"))
 
 READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "Bash(git:*)"]
 WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"]
+LSP_SHIM_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lsp"
+
+
+def with_lsp_shim(path: str | None) -> str:
+    """`path` with scripts/lsp first, so an agent's TypeScript LSP plugin runs
+    the shim that keeps every request on the semantic tsserver."""
+    return os.pathsep.join(p for p in (str(LSP_SHIM_DIR), path) if p)
 
 
 def _env():
@@ -455,6 +463,66 @@ LSP_RULE = (
 )
 
 
+REVIEW_TSSERVER = "/usr/lib/node_modules/typescript/lib/tsserver.js"
+REVIEW_TS_PLUGIN_DIR = Path(__file__).resolve().parent.parent / "plugins" / "review-typescript-lsp"
+MARKETPLACE_TS_PLUGIN = "typescript-lsp@claude-plugins-official"
+
+
+def review_checkout_args(cwd) -> list[str]:
+    """The flags a Claude run needs when its working directory is a pull
+    request checkout, [] for any other directory.
+
+    Claude Code reads .claude/settings.json and .claude/settings.local.json
+    of its working directory, and a hook there runs a command at session
+    start whatever the permission mode and the tool list say.
+    `--setting-sources user` loads the user settings only.
+
+    typescript-language-server runs the tsserver of the workspace when it
+    finds node_modules/typescript/lib or .yarn/sdks/typescript/lib there, and
+    that tsserver loads the tsconfig plugins of the workspace. The marketplace
+    typescript plugin is turned off and plugins/review-typescript-lsp, which
+    pins tsserver.path to the global install, takes its place. The server
+    falls back to the workspace tsserver when the pinned path does not exist,
+    so without the global install the session runs with no TypeScript server
+    at all."""
+    if not cwd or not review_checkout(cwd):
+        return []
+    args = ["--setting-sources", "user",
+            "--settings", json.dumps({"enabledPlugins": {MARKETPLACE_TS_PLUGIN: False}})]
+    if os.path.isfile(REVIEW_TSSERVER):
+        args += ["--plugin-dir", str(REVIEW_TS_PLUGIN_DIR)]
+    return args
+
+
+def codex_review_checkout_args(cwd) -> list[str]:
+    """The flags a codex run needs when its working directory is a pull
+    request checkout, [] for any other directory.
+
+    codex loads .codex/config.toml from its project root down to its working
+    directory, and an [mcp_servers] entry there starts a command at session
+    start, even under --dangerously-bypass-approvals-and-sandbox and with no
+    trust entry for the folder. codex has no flag that skips project config.
+    It skips the project layers only when the project root is marked
+    untrusted, and the mark must name the root itself: a mark on a parent
+    folder does not cover it. The project root is the nearest folder with a
+    .git, so every ancestor of the working directory, as given and resolved,
+    is marked. The override must be an inline table: codex splits a dotted
+    -c key on every dot and keeps the quotes of a quoted path segment."""
+    if not cwd or not review_checkout(cwd):
+        return []
+    dirs = sorted({str(d) for base in (Path(cwd).absolute(), Path(cwd).resolve())
+                   for d in (base, *base.parents)})
+    table = ", ".join(f'{json.dumps(d, ensure_ascii=False)} = {{ trust_level = "untrusted" }}' for d in dirs)
+    return ["-c", f"projects = {{ {table} }}"]
+
+
+def _with_codex_review_args(cmd: list[str], cwd) -> list[str]:
+    if Path(cmd[0]).name != "codex" or "exec" not in cmd:
+        return cmd
+    at = cmd.index("exec") + 1
+    return [*cmd[:at], *codex_review_checkout_args(cwd), *cmd[at:]]
+
+
 def _denied_tools_args(denied_tools: tuple[str, ...] | list[str] | None) -> list[str]:
     """A `claude -p` run keeps its process alive until a scheduled wakeup
     fires, so every headless run denies HEADLESS_DENIED_TOOLS on top of the
@@ -489,6 +557,7 @@ class ClaudeProvider(LLMProvider):
         env = {**_env(), lsp_gate.GATE_ENV: "1"}
         for key, value in self.env_overrides.items():
             env[key] = os.path.expanduser(value)
+        env["PATH"] = with_lsp_shim(env.get("PATH"))
         return env
 
     def _cmd(self, *args: str) -> list[str]:
@@ -518,6 +587,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--dangerously-skip-permissions"]
         cmd += _denied_tools_args(denied_tools)
         cmd += ["--append-system-prompt", LSP_RULE]
+        cmd += review_checkout_args(cwd)
         inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
@@ -718,6 +788,7 @@ class ClaudeProvider(LLMProvider):
                     "--append-system-prompt", LSP_RULE]
             if tools:
                 cmd += ["--allowedTools", ",".join(tools)]
+            cmd += review_checkout_args(cwd)
         cmd += _denied_tools_args(None)
         text, _ = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                   model=chosen_model, cwd=cwd, tools=tools,
@@ -747,6 +818,7 @@ class ClaudeProvider(LLMProvider):
         cmd += _denied_tools_args(denied_tools)
         for extra in add_dirs or []:
             cmd += ["--add-dir", str(extra)]
+        cmd += review_checkout_args(cwd)
         text, usage = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                       model=chosen_model, cwd=cwd, tools=tools,
                                       timeout=timeout, label="Claude agent", schema=schema)
@@ -1143,6 +1215,9 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
     logging as Claude. Returns (text, exit_code); both are None when the CLI
     times out or cannot be started at all.
 
+    A `codex exec` run whose cwd is a pull request checkout gets the flags of
+    codex_review_checkout_args.
+
     `output_schema` is for `codex exec` only: it is written to a file and
     passed as --output-schema, and the caller reads the answer with
     parse_structured.
@@ -1166,6 +1241,7 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                 fn_name=fn_name, model=model, prompt=prompt, cwd=cwd, timeout=timeout,
                 env_extra=env_extra, last_message_file=last_message_file,
                 transcript_file=transcript_file, stdin_text=stdin_text)
+    cmd = _with_codex_review_args(cmd, cwd)
     inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
     t0 = time.monotonic()
     env = {**os.environ, **(env_extra or {})}

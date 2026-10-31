@@ -196,17 +196,18 @@ class TestClientPullRequestProposals:
 
 class TestMutedClass:
     @staticmethod
-    def _history(declined, total=work_store.MUTE_WINDOW, klass="follow_up_person"):
+    def _history(declined, total=work_store.MUTE_WINDOW, klass="health_doctor"):
         for i in range(total):
-            objective = (f"Follow up with Si Fokon on email: answer message {i}"
-                         if klass == "follow_up_person" else f"Tidy the notes, part {i}")
+            objective = {"health_doctor": f"Doctor the queue, pass {i}",
+                         "follow_up_person": f"Follow up with Si Fokon on email: answer message {i}",
+                         }.get(klass, f"Tidy the notes, part {i}")
             item_id = _file(objective, contexts="saidanlabs,followup")
             if i < declined:
                 work_store.apply_action(item_id, "decline")
             else:
                 assert work_store.claim_proposal(item_id)
 
-    NEXT = "Follow up with Stean Piostol on text message: confirm the time"
+    NEXT = "Restore the backup of the notes"
 
     def test_a_class_declined_more_than_eighty_percent_is_muted(self):
         self._history(declined=17)
@@ -215,7 +216,7 @@ class TestMutedClass:
             _file(self.NEXT, contexts="saidanlabs,followup")
 
         assert raised.value.event == work_store.PROPOSAL_CLASS_MUTED_EVENT
-        assert raised.value.proposal_class == "follow_up_person"
+        assert raised.value.proposal_class == "health_doctor"
         assert _count(self.NEXT) == 0
         [event] = _events(work_store.PROPOSAL_CLASS_MUTED_EVENT)
         assert "17 of its last 20" in event["summary"]
@@ -236,12 +237,49 @@ class TestMutedClass:
         self._history(declined=20, klass="other")
         assert _file("Tidy the notes, part 99", contexts="saidanlabs,followup")
 
+    def test_a_follow_up_is_never_muted(self):
+        self._history(declined=20, klass="follow_up_person")
+        assert _file("Follow up with Stean Piostol on text message: confirm the time",
+                     contexts="saidanlabs,followup")
+
     def test_a_waiting_proposal_does_not_count(self):
         self._history(declined=16)
         for i in range(3):
-            _file(f"Follow up with Si Fokon on email: waiting {i}",
-                  contexts="saidanlabs,followup")
+            _file(f"Doctor the queue, waiting {i}", contexts="saidanlabs,followup")
         assert _file(self.NEXT, contexts="saidanlabs,followup")
+
+    @staticmethod
+    def _age_declines(days):
+        at = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        db.execute("UPDATE work_items SET archived_at = ? WHERE stop_reason = ?",
+                   (at, work_store.DECLINED_REASON))
+
+    def test_the_mute_lifts_after_mute_days(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS + 1)
+        assert _file(self.NEXT, contexts="saidanlabs,followup")
+
+    def test_the_mute_holds_within_mute_days(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS - 1)
+        with pytest.raises(work_store.ProposalSuppressed) as raised:
+            _file(self.NEXT, contexts="saidanlabs,followup")
+        assert raised.value.event == work_store.PROPOSAL_CLASS_MUTED_EVENT
+
+    def test_a_decline_after_the_mute_lifts_renews_it(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS + 1)
+        work_store.apply_action(_file(self.NEXT, contexts="saidanlabs,followup"), "decline")
+        with pytest.raises(work_store.ProposalSuppressed):
+            _file("Doctor the queue, after the lift", contexts="saidanlabs,followup")
+
+    def test_the_latest_decline_holds_the_mute_not_the_newest_proposal(self):
+        self._history(declined=20)
+        self._age_declines(work_store.MUTE_DAYS + 1)
+        older = db.query_all("SELECT id FROM work_items ORDER BY id")[0]["id"]
+        _age_decline(older, 0)
+        with pytest.raises(work_store.ProposalSuppressed):
+            _file(self.NEXT, contexts="saidanlabs,followup")
 
     def test_the_board_can_turn_the_mute_off(self, monkeypatch):
         self._history(declined=20)
