@@ -1161,7 +1161,7 @@ def restore_open_sessions() -> list[int] | None:
 
 
 RESTART_CONTINUE_PROMPT = (
-    "frshty restarted and killed your session, and this session is a resume of it. "
+    work_store.BOARD_PROMPT_MARKER + " frshty restarted and killed your session, and this session is a resume of it. "
     "A tool call that was running when the restart came did not finish, and its "
     "result is lost. Check the current state of the work, then continue the objective.")
 

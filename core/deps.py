@@ -30,12 +30,10 @@ self-healing: the next ensure rebuilds it.
 """
 import fcntl
 import hashlib
-import json
 import os
 import shlex
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -45,7 +43,6 @@ BUILD_TIMEOUT = 1800
 DEP_TIMEOUT = 300
 GC_INTERVAL_S = 86400
 DEFAULT_MAX_AGE_DAYS = 14
-REVIEW_PRISMA_GENERATOR = "frshty_review_client"
 
 
 def venv_store_dir(config: dict) -> Path:
@@ -168,10 +165,11 @@ def relink_shared_venv(config: dict, repo_name: str, wt_path: Path) -> None:
         _link(wt_path, venv)
 
 
-def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> bool:
+def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> str | None:
     """Run one configured dep_commands entry. pipenv commands for repos with
     a Pipfile route through the shared venv store; everything else runs
-    unchanged with the historical fire-and-forget semantics.
+    unchanged with the historical fire-and-forget semantics. Return None on
+    success, or the reason the command failed.
 
     A pipenv command in a worktree with no Pipfile is refused. pipenv has
     nothing to install there, so all it does is write a skeleton Pipfile, and
@@ -190,14 +188,28 @@ def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> bo
                      f"{repo_name}: skipped `{cmd}` — the worktree has no Pipfile, "
                      f"so pipenv would only write a skeleton one",
                      meta={"repo": repo_name, "cmd": cmd, "worktree": str(wt_path)})
-            return False
-        return ensure_shared_venv(config, repo_name, wt_path, dep_cmd=cmd)
+            return "the worktree has no Pipfile"
+        if ensure_shared_venv(config, repo_name, wt_path, dep_cmd=cmd):
+            return None
+        return "the shared venv build failed"
     try:
         result = subprocess.run(argv, cwd=str(wt_path), capture_output=True,
-                                timeout=DEP_TIMEOUT)
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return False
-    return result.returncode == 0
+                                text=True, errors="replace", timeout=DEP_TIMEOUT)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        return f"{type(e).__name__}: {e}"
+    if result.returncode == 0:
+        return None
+    return failure_reason(result)
+
+
+def failure_reason(result: subprocess.CompletedProcess) -> str:
+    """`rc=<code>: ` and the last 500 characters of stderr and of stdout.
+    pnpm writes its ERR_PNPM line to stdout and only warnings to stderr, so
+    stderr alone can hold no reason at all."""
+    tails = [f"{name}: {text.strip()[-500:]}"
+             for name, text in (("stderr", result.stderr), ("stdout", result.stdout))
+             if text and text.strip()]
+    return f"rc={result.returncode}: " + " | ".join(tails)
 
 
 def install_worktree_deps(config: dict, repo_name: str, wt_path: Path,
@@ -209,96 +221,12 @@ def install_worktree_deps(config: dict, repo_name: str, wt_path: Path,
     for dep in (config.get("workspace") or {}).get(key, []) or []:
         if dep.get("match") != repo_name:
             continue
-        if not run_dep_command(config, repo_name, wt_path, dep["cmd"]):
-            log.emit("worktree_dep_command_failed",
-                     f"{repo_name}: `{dep['cmd']}` failed in {wt_path}",
-                     meta={"repo": repo_name, "cmd": dep["cmd"], "worktree": str(wt_path)})
-
-
-def _worktree_path(wt_path: Path, rel: str) -> Path | None:
-    """`wt_path / rel` when `rel` is relative, has no `..` part, and no part
-    of it that exists is a symlink. None otherwise."""
-    parts = Path(rel).parts
-    if not parts or Path(rel).is_absolute() or ".." in parts:
-        return None
-    path = wt_path
-    for part in parts:
-        path = path / part
-        if path.is_symlink():
-            return None
-    return path
-
-
-def _prisma_generate(entry: dict, wt_path: Path) -> str | None:
-    """Generate the Prisma client for one `workspace.review_prisma` entry and
-    return None, or return the reason it did not.
-
-    The PR controls the schema text and nothing else. The operator's pinned
-    CLI (`entry["cli"]`) runs from a scratch directory with a frshty config,
-    so the PR prisma.config.ts and node_modules are never loaded. frshty
-    appends its own generator block and selects only that block with
-    `--generator`, so a PR generator, whose provider is a shell command,
-    never runs, and the PR names no output path. env -i keeps every
-    PRISMA_* override out, and PRISMA_SCHEMA_ENGINE_BINARY stops the CLI
-    from fetching a schema engine that generate does not use.
-    """
-    schema = _worktree_path(wt_path, entry["schema"])
-    if schema is None or not schema.is_file():
-        return f"schema {entry['schema']} is missing or passes through a symlink"
-    dest = _worktree_path(wt_path, entry["output"])
-    if dest is None:
-        return f"output {entry['output']} passes through a symlink"
-    try:
-        text = schema.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        return f"schema {entry['schema']} is unreadable: {e}"
-    with tempfile.TemporaryDirectory(prefix="frshty-prisma-") as tmp:
-        stage = Path(tmp)
-        out = stage / "out"
-        options = "".join(f"  {k} = {json.dumps(v)}\n"
-                          for k, v in (entry.get("options") or {}).items())
-        (stage / "schema.prisma").write_text(
-            text + f"\n\ngenerator {REVIEW_PRISMA_GENERATOR} {{\n"
-            f"  provider = \"prisma-client\"\n  output = {json.dumps(str(out))}\n{options}}}\n",
-            encoding="utf-8")
-        (stage / "prisma.config.mjs").write_text(
-            f"export default {{ schema: {json.dumps(str(stage / 'schema.prisma'))} }}\n")
-        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(stage),
-               "CHECKPOINT_DISABLE": "1", "PRISMA_HIDE_UPDATE_MESSAGE": "1",
-               "PRISMA_SCHEMA_ENGINE_BINARY": "/bin/false"}
-        argv = ["node", entry["cli"], "generate", "--config", str(stage / "prisma.config.mjs"),
-                "--generator", REVIEW_PRISMA_GENERATOR]
-        try:
-            result = subprocess.run(argv, cwd=str(stage), env=env, capture_output=True,
-                                    text=True, timeout=DEP_TIMEOUT)
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
-            return f"{type(e).__name__}: {e}"
-        if result.returncode != 0 or not out.is_dir():
-            return f"rc={result.returncode}: {(result.stderr or result.stdout or '')[-500:]}"
-        try:
-            if dest.is_dir():
-                shutil.rmtree(dest)
-            elif dest.exists():
-                dest.unlink()
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(out, dest, symlinks=True)
-        except OSError as e:
-            return f"copy to {entry['output']} failed: {e}"
-    return None
-
-
-def generate_review_prisma(config: dict, repo_name: str, wt_path: Path) -> None:
-    """Run every `workspace.review_prisma` entry that matches `repo_name` in
-    `wt_path`. A failure is logged, not raised, so the review still runs."""
-    for entry in (config.get("workspace") or {}).get("review_prisma", []) or []:
-        if entry.get("match") != repo_name:
-            continue
-        reason = _prisma_generate(entry, wt_path)
+        reason = run_dep_command(config, repo_name, wt_path, dep["cmd"])
         if reason:
-            log.emit("review_prisma_generate_failed",
-                     f"{repo_name}: prisma generate failed in {wt_path}: {reason}",
-                     meta={"repo": repo_name, "schema": entry["schema"],
-                           "worktree": str(wt_path)})
+            log.emit("worktree_dep_command_failed",
+                     f"{repo_name}: `{dep['cmd']}` failed in {wt_path}: {reason}",
+                     meta={"repo": repo_name, "cmd": dep["cmd"], "worktree": str(wt_path),
+                           "reason": reason})
 
 
 def export_pnpm_store(config: dict) -> None:
