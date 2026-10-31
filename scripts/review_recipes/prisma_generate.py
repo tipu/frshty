@@ -84,7 +84,10 @@ def generate(cli: str, schema_rel: str, output_rel: str, options: dict,
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
             return f"{type(e).__name__}: {e}"
         if result.returncode != 0 or not out.is_dir():
-            return f"rc={result.returncode}: {(result.stderr or result.stdout or '')[-500:]}"
+            tails = [f"{name}: {text.strip()[-500:]}"
+                     for name, text in (("stderr", result.stderr), ("stdout", result.stdout))
+                     if text and text.strip()]
+            return f"rc={result.returncode}: " + " | ".join(tails)
         try:
             if dest.is_dir():
                 shutil.rmtree(dest)
