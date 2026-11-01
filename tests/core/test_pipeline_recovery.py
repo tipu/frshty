@@ -620,14 +620,14 @@ class TestForeignPrHold:
 
     def test_pipeline_prompts_forbid_push_pr_and_ticket_writes(self, monkeypatch):
         import core.tasks.tickets as task_tickets
-        from core.llm import NO_PUBLISH_RULE
+        from core.llm import NO_PUBLISH_RULE, TICKET_WORKSPACE_RULE
         seen = []
         monkeypatch.setattr(task_tickets, "run_claude_code",
                             lambda prompt, **k: seen.append(prompt) or "ok")
 
         task_tickets._run_pipeline_agent("do the work", cwd=Path("/x"), timeout=5)
 
-        assert seen == [f"do the work\n\n{NO_PUBLISH_RULE}"]
+        assert seen == [f"do the work\n\n{TICKET_WORKSPACE_RULE}\n\n{NO_PUBLISH_RULE}"]
 
     def test_pipeline_prompts_name_the_project_rules_files(self, monkeypatch, tmp_path):
         import core.tasks.tickets as task_tickets

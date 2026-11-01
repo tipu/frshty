@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 
 import core.consensus_scope as consensus_scope
+from core.llm import TICKET_WORKSPACE_RULE
 
 
 def _git(cwd, *args):
@@ -103,7 +104,8 @@ class TestRunScopeReview:
         assert f"- {tmp_path / 'CLAUDE.md'}" in prompt
         assert str(wt / 'CLAUDE.md') not in prompt
         deepseek_prompt = fan_out.call_args.kwargs["deepseek_prompt"]
-        assert prompt.startswith(deepseek_prompt)
+        assert deepseek_prompt.endswith(f"\n\n{TICKET_WORKSPACE_RULE}")
+        assert prompt.startswith(deepseek_prompt.removesuffix(f"\n\n{TICKET_WORKSPACE_RULE}"))
         assert "CLAUDE.md" not in deepseek_prompt
 
     def test_all_pass(self, tmp_path, scope_config):
