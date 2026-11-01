@@ -3478,6 +3478,41 @@ def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
     return f"{owed} comment(s) owed an answer", rows
 
 
+def _unapproved_prs(config, ts, pr_info_map=None) -> list[dict]:
+    """The ticket PRs that hold the merge under [pr] merge_when_all_approved.
+
+    A PR counts as approved when an account other than its author's approved
+    it. An unknown author account counts as unapproved. The merge waits until
+    no PR of the ticket is left, so one approved PR never merges ahead of its
+    siblings. Empty when the rule is off."""
+    if not config.get("pr", {}).get("merge_when_all_approved"):
+        return []
+    platform = make_platform(config)
+    out = []
+    for pr in ts.get("prs", []):
+        info = _get_pr_info(platform, pr_info_map, pr["repo"], pr["id"])
+        author = info.get("author_id", "")
+        if not author or not any(a and a != author for a in info.get("approver_ids") or []):
+            out.append(pr)
+    return out
+
+
+def _hold_for_approvals(config, ticket, ts, base_url, pr_info_map=None) -> bool:
+    waiting = _unapproved_prs(config, ts, pr_info_map)
+    names = [f"{pr['repo']}#{pr['id']}" for pr in waiting]
+    if names and names != ts.get("merge_held_unapproved"):
+        log.emit("ticket_merge_held_for_approval",
+            f"{_label(ticket['key'], ts)}: Merge held until every PR is approved; "
+            f"waiting on {', '.join(names)}",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"], "unapproved": names})
+    if names:
+        ts["merge_held_unapproved"] = names
+    else:
+        ts.pop("merge_held_unapproved", None)
+    return bool(names)
+
+
 def _merge(config, ticket, ts, base_url, force: bool = False) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
