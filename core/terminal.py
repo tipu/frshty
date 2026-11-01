@@ -632,6 +632,7 @@ def _attach(ticket_key: str, config: dict, loop: asyncio.AbstractEventLoop) -> d
 async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
     entry = await run_in_threadpool(_attach, ticket_key, config, asyncio.get_running_loop())
     if entry is None:
+        await websocket.accept()
         await websocket.close(code=1008)
         return
 
