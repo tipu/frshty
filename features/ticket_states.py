@@ -508,7 +508,8 @@ def _handle_in_review_ticket(
     pr_cfg = config.get("pr", {})
     approval_rule = bool(pr_cfg.get("merge_when_all_approved"))
     scope_ok = (scope in ("disabled", "pass")
-                or (approval_rule and scope == "fail"))
+                or (approval_rule and scope == "fail"
+                    and not _t._scope_fix_incomplete(ts)))
     if (ts["status"] == "in_review" and ts.get("ci_passed")
             and (pr_cfg.get("auto_merge") or approval_rule)
             and scope_ok
