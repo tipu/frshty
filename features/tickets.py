@@ -2950,9 +2950,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 continue
 
             suggested = ""
+            if not actionable:
+                entry["no_reply_checked"] = True
             if not actionable and _comment_needs_no_reply(comment["body"]):
                 entry["status"] = "no_reply_needed"
-                entry["no_reply_checked"] = True
                 log.emit("ticket_pr_comment_no_reply_needed",
                     f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: No reply needed \u2014 {comment['body'][:80]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},

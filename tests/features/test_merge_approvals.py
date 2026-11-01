@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import features.tickets as tickets
 import features.ticket_states as ticket_states
+import web.tickets as web_tickets
 from tests.conftest import make_ticket, make_ticket_state
 import tests.features.test_merge_comment_gate as comment_gate
 from tests.features.test_scope_review import _reconciled
@@ -199,3 +200,9 @@ class TestANewApprovalCommentDoesNotHoldTheMerge:
             out = harness._handle(fake_config, platform)
         assert out[tickets.RECONCILE_OWED_KEY] == 0
         platform.merge_pr.assert_called_once_with("repo", 99)
+
+
+def test_the_pr_board_counts_a_no_reply_comment_as_done():
+    entries = [{"pr_repo": "api", "pr_id": 1, "status": "no_reply_needed"}]
+    assert web_tickets._pr_comment_breakdown(entries, "api", 1) == {
+        "done": 1, "not_done": 0, "discuss": 0}
