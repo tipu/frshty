@@ -26,6 +26,9 @@
 .tl-tools summary { color: #6b7280; cursor: pointer; font-size: 12px; user-select: none; }
 .tl-tools-body { border-left: 1px solid #2a2a35; margin: 4px 0 8px 3px; padding-left: 10px; }
 .tl-ts { color: #4b5563; font-size: 11px; font-family: monospace; }
+.btw-ask { background: #0d0d13; border: 1px solid #2a2a35; border-radius: 8px; padding: 8px 14px; }
+.btw-ask summary { cursor: pointer; user-select: none; }
+.btw-q { color: #93c5fd; white-space: pre-wrap; }
 .tl-image-toggle { color: #93c5fd; font-size: 12px; text-decoration: underline; cursor: pointer; margin-left: 6px; }
 .tl-image-toggle.only-image { margin-left: 0; }
 .tl-images { margin: 7px 0 12px 14px; }
@@ -185,14 +188,10 @@
       </div>
     </form>
     <div class="text-xs text-red-400 mt-1" v-if="btwError">{{ btwError }}</div>
-    <div class="tl-box mt-2" v-if="btwLog.length">
-      <div class="tl">
-        <template v-for="x in btwLog">
-          <div class="tl-prompt"><div class="tl-ts" :title="ts(x.at)">{{ rel(x.at) }}</div>❯ {{ x.question }}</div>
-          <div class="tl-text" v-html="lk(x.answer)"></div>
-        </template>
-      </div>
-    </div>
+    <details v-for="x in btwLog" :key="x.id" class="btw-ask mt-2">
+      <summary><span class="tl-ts" :title="ts(x.at)">{{ rel(x.at) }}</span> <span class="btw-q">❯ {{ x.question }}</span></summary>
+      <div class="tl-text" v-html="lk(x.answer)"></div>
+    </details>
   </div>
   <div class="sec" v-if="item.summary || finished">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Summary</h2>
@@ -453,7 +452,7 @@ const app = frshtyApp({
         if (ev.kind !== "btw") continue;
         let p = {};
         try { p = JSON.parse(ev.payload || "{}"); } catch (e) { continue; }
-        out.push({ question: p.question || "", answer: p.answer || "", at: ev.created_at });
+        out.push({ id: ev.id, question: p.question || "", answer: p.answer || "", at: ev.created_at });
       }
       return out.reverse();
     },
