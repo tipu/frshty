@@ -204,6 +204,7 @@ async def relay_terminal(websocket: WebSocket, key: str, term_key: str,
     unavailable terminal instead of a reconnect loop."""
     url, error = await run_in_threadpool(terminal_url, key, term_key)
     if error:
+        await websocket.accept()
         await websocket.close(code=1008, reason=error)
         return
     context = None
@@ -219,6 +220,7 @@ async def relay_terminal(websocket: WebSocket, key: str, term_key: str,
         await run_in_threadpool(log.emit, "work_peer_unreachable",
                                 f"WS {url} failed: {reason}",
                                 meta={"peer": key, "path": f"ws/terminal/{term_key}", "url": url})
+        await websocket.accept()
         await websocket.close(code=1008, reason=f"peer '{key}' is unreachable")
         return
     await websocket.accept()

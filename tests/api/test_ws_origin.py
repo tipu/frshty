@@ -10,6 +10,7 @@ hostname, of which three reach this board; a non-browser client sends none.
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from unittest.mock import MagicMock, patch
 
 import web.reviews as reviews_routes
@@ -74,3 +75,17 @@ def test_a_document_with_no_origin_of_its_own_is_refused(path, module, origin):
                 ws.receive_text()
     assert served == []
     resume.assert_not_called()
+
+
+def test_a_missing_session_is_accepted_then_closed_with_1008():
+    app = FastAPI()
+
+    @app.websocket("/ws")
+    async def route(websocket: WebSocket):
+        await tickets_routes.terminal.terminal_handler(websocket, "artifact-1", {})
+
+    with patch.object(tickets_routes.terminal, "_attach", MagicMock(return_value=None)):
+        with TestClient(app).websocket_connect("/ws") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_text()
+    assert exc.value.code == 1008
