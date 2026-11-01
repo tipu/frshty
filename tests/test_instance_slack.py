@@ -124,13 +124,13 @@ def test_aws_dir_is_mounted_at_home_aws_only_when_present(host):
     assert (str(root / "aws"), aws_home, False) in instance.mounts(c, config_path, root)
 
 
-def test_secrets_dir_is_mounted_read_only_only_when_present(host):
+def test_secrets_dir_is_created_and_mounted_read_only(host):
     slack, root, workspace, config_path = host
     c = config(slack, workspace)
-    secrets_home = str(instance.HOME / ".secrets")
-    assert not any(inside == secrets_home for _, inside, _ in instance.mounts(c, config_path, root))
-    (root / "secrets").mkdir()
-    assert (str(root / "secrets"), secrets_home, True) in instance.mounts(c, config_path, root)
+    assert not (root / "secrets").exists()
+    binds = instance.mounts(c, config_path, root)
+    assert (str(root / "secrets"), str(instance.HOME / ".secrets"), True) in binds
+    assert (root / "secrets").stat().st_mode & 0o777 == 0o700
 
 
 def test_claude_config_dir_is_mounted_and_named_for_the_aliases(host, tmp_path):
