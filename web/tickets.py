@@ -563,7 +563,7 @@ def _pr_comment_breakdown(entries: list[dict], repo: str, pr_id) -> dict:
         if e.get("pr_repo") != repo or e.get("pr_id") != pr_id:
             continue
         st = e.get("status")
-        if st in ("addressed", "replied"):
+        if st in ("addressed", "replied", "no_reply_needed"):
             done += 1
         elif st == "needs_reply":
             discuss += 1
