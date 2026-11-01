@@ -477,6 +477,11 @@ class BitbucketPlatform(_CIMonitorMixin):
                 for p in (data.get("participants") or [])
                 if p.get("approved")
             ]
+            approver_ids = [
+                p.get("user", {}).get("account_id", "")
+                for p in (data.get("participants") or [])
+                if p.get("approved")
+            ]
             reviewers = [
                 r.get("display_name") or r.get("account_id", "")
                 for r in (data.get("reviewers") or [])
@@ -490,6 +495,7 @@ class BitbucketPlatform(_CIMonitorMixin):
                 "author_id": data.get("author", {}).get("account_id", ""),
                 "mergeable": "CONFLICTING" if data.get("has_conflicts") else "MERGEABLE",
                 "approvers": approvers,
+                "approver_ids": approver_ids,
                 "reviewers": reviewers,
                 "head_sha": data.get("source", {}).get("commit", {}).get("hash", ""),
             }
@@ -1060,6 +1066,7 @@ class GitHubPlatform(_CIMonitorMixin):
             "author_id": data.get("author", {}).get("login", ""),
             "mergeable": data.get("mergeable", "UNKNOWN"),
             "approvers": approvers,
+            "approver_ids": approvers,
             "reviewers": [x for x in reviewers if x],
             "head_sha": data.get("headRefOid", ""),
         }
