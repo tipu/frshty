@@ -506,10 +506,21 @@ def _handle_in_review_ticket(
                              instance_key=instance_key)
 
     pr_cfg = config.get("pr", {})
+    approval_rule = bool(pr_cfg.get("merge_when_all_approved"))
+    scope_ok = (scope in ("disabled", "pass")
+                or (approval_rule and scope == "fail"
+                    and not _t._scope_fix_incomplete(ts)))
     if (ts["status"] == "in_review" and ts.get("ci_passed")
-            and (pr_cfg.get("auto_merge") or pr_cfg.get("merge_when_all_approved"))
-            and scope in ("disabled", "pass")
+            and (pr_cfg.get("auto_merge") or approval_rule)
+            and scope_ok
             and not _t._hold_for_approvals(config, ticket, ts, base_url, pr_info_map)):
+        if scope == "fail":
+            _t.emit_once(ts, "scope_fail_approval_override",
+                "ticket_scope_fail_overridden_by_approval",
+                f"{_t._label(key, ts)}: every PR is approved; the approvals replace the "
+                f"failed scope review and the merge proceeds",
+                links={"detail": f"{base_url}/tickets/{key}"},
+                meta={"ticket": key, "scope_review": ts.get("scope_review") or {}})
         ts = _t._merge(config, ticket, ts, base_url)
     return ts, False
 

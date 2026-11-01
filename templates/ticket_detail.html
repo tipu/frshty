@@ -1575,6 +1575,7 @@ frshtyApp({
             const s = c.status || 'needs_reply';
             if (s === 'addressed') return 'addressed';
             if (s === 'replied') return 'replied';
+            if (s === 'no_reply_needed') return 'no reply needed';
             return 'needs reply';
         }
 
@@ -1589,18 +1590,18 @@ frshtyApp({
         function commentClass(c) {
             const s = c.status || 'needs_reply';
             if (s === 'addressed') return 'addressed';
-            if (s === 'replied') return 'replied';
+            if (s === 'replied' || s === 'no_reply_needed') return 'replied';
             return 'needs_reply';
         }
 
         function commentBodyTextClass(c) {
             const s = c.status || 'needs_reply';
-            return (s === 'addressed' || s === 'replied') ? 'text-gray-400' : 'text-gray-300';
+            return (s === 'addressed' || s === 'replied' || s === 'no_reply_needed') ? 'text-gray-400' : 'text-gray-300';
         }
 
         function commentBadgeStyle(c) {
             const s = c.status || 'needs_reply';
-            if (s === 'addressed' || s === 'replied') return 'background:#14532d;color:#86efac';
+            if (s === 'addressed' || s === 'replied' || s === 'no_reply_needed') return 'background:#14532d;color:#86efac';
             return 'background:#713f12;color:#fde047';
         }
 
