@@ -834,10 +834,11 @@ class TestHookInstaller:
             "permissions": {"allow": ["Read"]},
         }))
         added = mod.install_into(str(settings))
-        expected = {e for e in mod.EVENTS if e != "PreToolUse"}
+        expected = {e for e in mod.EVENTS if e not in ("PreToolUse", "PostToolUse")}
         expected |= {"PreToolUse[AskUserQuestion]", "PreToolUse[Bash]", "PreToolUse[Grep]",
                      "PreToolUse[Monitor]",
                      f"PreToolUse[{mod.WRITE_GATE_MATCHER}]",
+                     f"PostToolUse[{mod.WRITE_GATE_MATCHER}]",
                      f"PreToolUse[{mod.CORRESPONDENCE_MATCHER}]"}
         assert set(added) == expected
         again = mod.install_into(str(settings))

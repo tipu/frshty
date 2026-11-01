@@ -8,12 +8,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core.config as cfg
 import core.terminal as terminal
 
-EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notification", "PreToolUse")
+EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notification", "PreToolUse",
+          "PostToolUse")
 DEFAULT_DIRS = ("~/.claude",)
 PUSH_GATE_TIMEOUT = 2700
 WRITE_GATE_TIMEOUT = 300
 LSP_GATE_TIMEOUT = 15
 WRITE_GATE_MATCHER = "Edit|Write|NotebookEdit|MultiEdit"
+MEMORY_COMMIT_TIMEOUT = 30
 # Every tool that could carry a message to a person. The matcher is a
 # regular expression over the tool name, and a name this pattern misses
 # never reaches the correspondence gate at all, so it is deliberately
@@ -79,6 +81,10 @@ def _wanted_entries(event: str, command: str) -> list[dict]:
              "hooks": [{"type": "command", "command": command,
                         "timeout": CORRESPONDENCE_GATE_TIMEOUT}]},
         ]
+    if event == "PostToolUse":
+        return [{"matcher": WRITE_GATE_MATCHER,
+                 "hooks": [{"type": "command", "command": command,
+                            "timeout": MEMORY_COMMIT_TIMEOUT}]}]
     return [{"matcher": "",
              "hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}]}]
 
