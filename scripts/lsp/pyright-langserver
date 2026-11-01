@@ -1,0 +1,217 @@
+#!/usr/bin/env node
+/*
+ * Runs the real pyright-langserver with two changes.
+ *
+ * Claude Code starts the server with the session directory as the only
+ * workspace folder, and pyright reads pyrightconfig.json or pyproject.toml
+ * only at a workspace folder. A session that starts in a directory above its
+ * repositories, such as an instance workspace with tickets/<task>/<repo>,
+ * gets no venv and no extraPaths, and pyright lists every Python file below
+ * that directory before it answers workspace/symbol: one such workspace held
+ * 100,911 files and answered nothing in 60 s. When the session directory
+ * holds no project file, the shim drops it as a workspace folder and adds
+ * the nearest directory above each opened file that holds one.
+ *
+ * pyright answers workspace/symbol with null until it has listed the files of
+ * every workspace folder, so the first workspaceSymbol of a session answered
+ * "No symbols found". The shim holds workspace/symbol, references and
+ * incoming calls, and every client message after them so that no edit
+ * overtakes a held request, until pyright logs the file count of each
+ * workspace folder it started, or for HOLD_MS.
+ */
+const { spawn } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const { fileURLToPath, pathToFileURL } = require("url");
+
+const NAME = "pyright-langserver";
+const SELF = fs.realpathSync(__filename);
+const PROJECT_FILES = ["pyrightconfig.json", "pyproject.toml"];
+const ROOT_FILES = [...PROJECT_FILES, "setup.py", "setup.cfg", "requirements.txt"];
+const HELD = new Set(["workspace/symbol", "textDocument/references", "callHierarchy/incomingCalls"]);
+const HOLD_MS = Number(process.env.FRSHTY_PYRIGHT_HOLD_MS || 60000);
+const STARTED = /^Starting service instance /;
+const LISTED = /^(Found \d+ source files?|No source files found\.?)$/;
+
+function realServer() {
+  for (const dir of (process.env.PATH || "").split(path.delimiter)) {
+    const candidate = path.resolve(dir, NAME);
+    try {
+      if (fs.realpathSync(candidate) === SELF) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function holds(dir, names) {
+  return names.some((name) => fs.existsSync(path.join(dir, name)));
+}
+
+function filePath(uri) {
+  try {
+    return typeof uri === "string" && uri.startsWith("file:") ? fileURLToPath(uri) : null;
+  } catch {
+    return null;
+  }
+}
+
+function within(file, dir) {
+  const relative = path.relative(dir, file);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function project(file) {
+  for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+    if (holds(dir, PROJECT_FILES)) return dir;
+    if (path.dirname(dir) === dir) return null;
+  }
+}
+
+const server = realServer();
+if (!server) {
+  process.stderr.write(`${NAME}: no other ${NAME} on PATH\n`);
+  process.exit(127);
+}
+
+const child = spawn(server, process.argv.slice(2), { stdio: ["pipe", "pipe", "inherit"] });
+child.on("error", (error) => {
+  process.stderr.write(`${NAME}: ${server}: ${error.message}\n`);
+  process.exit(1);
+});
+child.on("exit", (code, signal) => {
+  if (signal) {
+    process.removeAllListeners(signal);
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code === null ? 1 : code);
+});
+child.stdin.on("error", () => {});
+
+let root = null;
+const folders = new Set();
+let expected = 0;
+let started = 0;
+let listed = 0;
+let queue = [];
+let deadline = null;
+
+function send(stream, body) {
+  stream.write(`Content-Length: ${body.length}\r\n\r\n`);
+  stream.write(body);
+}
+
+function sendMessage(message) {
+  send(child.stdin, Buffer.from(JSON.stringify(message), "utf8"));
+}
+
+function release(all) {
+  if (deadline === null || !(all || listed >= expected || Date.now() >= deadline)) return;
+  for (const body of queue) send(child.stdin, body);
+  queue = [];
+  deadline = null;
+}
+
+function initialize(message) {
+  const params = message.params || (message.params = {});
+  const first = Array.isArray(params.workspaceFolders) && params.workspaceFolders[0];
+  const dir = filePath(first ? first.uri : params.rootUri) || params.rootPath || null;
+  const capabilities = params.capabilities || (params.capabilities = {});
+  const workspace = capabilities.workspace || (capabilities.workspace = {});
+  workspace.workspaceFolders = true;
+  if (dir && holds(dir, ROOT_FILES)) {
+    root = dir;
+    expected = 1;
+  } else {
+    params.workspaceFolders = [];
+    params.rootUri = null;
+    params.rootPath = null;
+  }
+}
+
+function addFolder(uri) {
+  const file = filePath(uri);
+  if (!file || (root && within(file, root))) return;
+  const dir = project(file);
+  if (!dir || folders.has(dir)) return;
+  folders.add(dir);
+  expected += 1;
+  sendMessage({
+    jsonrpc: "2.0",
+    method: "workspace/didChangeWorkspaceFolders",
+    params: { event: { added: [{ uri: pathToFileURL(dir).href, name: path.basename(dir) }], removed: [] } },
+  });
+}
+
+function fromClient(body) {
+  let message;
+  try {
+    message = JSON.parse(body.toString("utf8"));
+  } catch {
+    message = null;
+  }
+  if (message && message.method === "initialize") {
+    initialize(message);
+    sendMessage(message);
+    return;
+  }
+  const document = message && message.params && message.params.textDocument;
+  if (document) addFolder(document.uri);
+  if (deadline === null && message && message.id !== undefined && HELD.has(message.method)
+      && listed < expected) {
+    deadline = Date.now() + HOLD_MS;
+    setTimeout(() => release(false), HOLD_MS + 10).unref();
+  }
+  if (deadline !== null) queue.push(body);
+  else send(child.stdin, body);
+}
+
+function fromServer(body) {
+  try {
+    const message = JSON.parse(body.toString("utf8"));
+    const text = message && message.method === "window/logMessage"
+      && String(message.params && message.params.message);
+    if (text && STARTED.test(text)) started += 1;
+    if (text && LISTED.test(text) && started > 0) {
+      started -= 1;
+      listed += 1;
+      release(false);
+    }
+  } catch {}
+  send(process.stdout, body);
+}
+
+function reader(handle) {
+  let pending = Buffer.alloc(0);
+  return (chunk) => {
+    pending = Buffer.concat([pending, chunk]);
+    for (;;) {
+      const headerEnd = pending.indexOf("\r\n\r\n");
+      if (headerEnd < 0) return;
+      const match = /Content-Length:\s*(\d+)/i.exec(pending.subarray(0, headerEnd).toString("ascii"));
+      const start = headerEnd + 4;
+      if (!match) {
+        pending = pending.subarray(start);
+        continue;
+      }
+      const stop = start + Number(match[1]);
+      if (pending.length < stop) return;
+      handle(pending.subarray(start, stop));
+      pending = pending.subarray(stop);
+    }
+  };
+}
+
+process.stdin.on("data", reader(fromClient));
+process.stdin.on("end", () => {
+  release(true);
+  child.stdin.end();
+});
+child.stdout.on("data", reader(fromServer));
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(signal, () => child.kill(signal));
+}
