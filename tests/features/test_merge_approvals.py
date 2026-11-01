@@ -116,6 +116,14 @@ class TestApprovalsOverrideAScopeFail:
         merge.assert_called_once()
         assert log.emit.call_args[0][0] == "ticket_scope_fail_overridden_by_approval"
 
+    def test_an_unfinished_scope_correction_still_holds(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=PRS,
+                               scope_fix={"incomplete": "a commit was blocked part way"})
+        merge = self._handle(fake_config, ts, {("api", 1): _info("reviewer-login"),
+                                               ("web", 2): _info("reviewer-login")}, "fail")
+        merge.assert_not_called()
+
     def test_a_scope_fail_still_holds_while_a_pr_waits(self, fake_config):
         fake_config["pr"]["merge_when_all_approved"] = True
         ts = make_ticket_state(status="in_review", ci_passed=True, prs=PRS)
