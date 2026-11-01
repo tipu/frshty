@@ -485,6 +485,9 @@ _RANKER_SCHEMA = strict_object({
         "reason": {"type": "string"},
     })},
 })
+_NO_REPLY_SCHEMA = strict_object({
+    "needs_reply": {"type": "boolean"},
+})
 _TRIAGE_SCHEMA = strict_object({
     "results": {"type": "array", "items": strict_object({
         "i": {"type": "integer"},
@@ -2248,6 +2251,47 @@ def _reply_commits_to_change(reply: str) -> bool:
     return isinstance(parsed, dict) and bool(parsed.get("commits_to_change"))
 
 
+def _comment_needs_no_reply(body: str) -> bool:
+    """Whether a review comment is a statement that asks the author for nothing.
+
+    An approval, a sign-off, thanks or a status report needs no answer. Such a
+    comment held the merge as owed for the life of the PR, because nobody
+    replies to it. A failed or unclear answer counts as a reply needed."""
+    prompt = (
+        "A reviewer left this comment on a pull request. Does it need a reply "
+        "from the PR author? needs_reply=false ONLY when the comment asks for "
+        "nothing: an approval, a sign-off, 'LGTM', thanks, or a report such as "
+        "'review done, no issues found, approved'. needs_reply=true when it asks "
+        "a question, requests or suggests a change, raises a concern, or you are "
+        "not sure.\n\n"
+        f"COMMENT:\n{body}\n\n"
+        'Reply with JSON: {"needs_reply": true|false}'
+    )
+    parsed = parse_structured(run_haiku(prompt, schema=_NO_REPLY_SCHEMA),
+                              _NO_REPLY_SCHEMA, fn_name="ticket_comment_no_reply")
+    return parsed is not None and parsed["needs_reply"] is False
+
+
+def _settle_statement_comments(ticket, ts, pr, unresolved: list[dict],
+                               latest_entries: dict, base_url: str) -> None:
+    """Re-check owed 'needs_reply' entries once for a statement that needs no reply.
+
+    Entries registered before the check existed stay owed otherwise. Each
+    entry is asked once; the answer is kept on the entry."""
+    for comment in unresolved:
+        entry = latest_entries.get(_comment_key(comment))
+        if (entry is None or entry.get("status") != "needs_reply"
+                or entry.get("no_reply_checked")):
+            continue
+        entry["no_reply_checked"] = True
+        if _comment_needs_no_reply(comment["body"]):
+            entry["status"] = "no_reply_needed"
+            log.emit("ticket_pr_comment_no_reply_needed",
+                f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: No reply needed \u2014 {comment['body'][:80]}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+
+
 def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> dict:
     """Queue the evidence run for a drafted reply and return its pending marker.
 
@@ -2282,8 +2326,8 @@ def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> di
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
 PR_COMMENT_FIX_TIMEOUT = 1800
 
-COMMENT_SETTLED_STATUSES = ("addressed", "replied", "needs_reply")
-COMMENT_ANSWERED_STATUSES = ("addressed", "replied")
+COMMENT_SETTLED_STATUSES = ("addressed", "replied", "needs_reply", "no_reply_needed")
+COMMENT_ANSWERED_STATUSES = ("addressed", "replied", "no_reply_needed")
 RECONCILE_READ_KEY = "_comments_read_ok"
 RECONCILE_OWED_KEY = "_comments_owed"
 AUTOMATED_REVIEW_FIX_STATUSES = ("addressed", "fix_unpushed", "fix_failed", "fix_unresolved")
@@ -2789,6 +2833,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             if pending:
                 _advance_comment_cursors(pending, set(), pr_key,
                                          last_comment_ids, last_issue_comment_ids)
+            _settle_statement_comments(ticket, ts, pr, unresolved, latest_entries, base_url)
             owed_now += _owed_on_pr(unresolved, [], [], latest_entries)
             continue
 
@@ -2905,6 +2950,16 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 continue
 
             suggested = ""
+            if not actionable and _comment_needs_no_reply(comment["body"]):
+                entry["status"] = "no_reply_needed"
+                entry["no_reply_checked"] = True
+                log.emit("ticket_pr_comment_no_reply_needed",
+                    f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: No reply needed \u2014 {comment['body'][:80]}",
+                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                    meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                pr_comments.append(entry)
+                batch_entries.append(entry)
+                continue
             if not actionable:
                 suggested = _draft_comment_reply(config, slug, ticket, comment, pr)
                 if _reply_commits_to_change(suggested):

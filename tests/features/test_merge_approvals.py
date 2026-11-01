@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import features.tickets as tickets
 import features.ticket_states as ticket_states
 from tests.conftest import make_ticket, make_ticket_state
+import tests.features.test_merge_comment_gate as comment_gate
 from tests.features.test_scope_review import _reconciled
 
 PRS = [{"repo": "api", "id": 1, "url": ""}, {"repo": "web", "id": 2, "url": ""}]
@@ -12,10 +13,10 @@ def _info(*approvers, author="author-login"):
     return {"state": "OPEN", "author_id": author, "approver_ids": list(approvers)}
 
 
-def _handle(config, ts, info_map):
+def _handle(config, ts, info_map, scope="disabled"):
     platform = MagicMock()
     platform.monitor_ci.return_value = ts
-    with patch("features.tickets._scope_review_state", return_value="disabled"), \
+    with patch("features.tickets._scope_review_state", return_value=scope), \
          patch("features.tickets._resolve_conflicts_pending", return_value=False), \
          patch("features.tickets._build_pr_info_map", return_value=info_map), \
          patch("features.tickets._has_conflicting_pr", return_value=False), \
@@ -97,3 +98,96 @@ class TestMergeWhenAllApproved:
             assert tickets._hold_for_approvals(fake_config, make_ticket(), ts, "b", info)
             assert tickets._hold_for_approvals(fake_config, make_ticket(), ts, "b", info)
         assert log.emit.call_count == 1
+
+
+_REAL_NO_REPLY = tickets._comment_needs_no_reply
+
+
+class TestApprovalsOverrideAScopeFail:
+    def _handle(self, config, ts, info_map, scope):
+        return _handle(config, ts, info_map, scope)
+
+    def test_all_approved_merges_over_a_scope_fail(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=PRS)
+        with patch("features.tickets.log") as log:
+            merge = self._handle(fake_config, ts, {("api", 1): _info("reviewer-login"),
+                                                   ("web", 2): _info("reviewer-login")}, "fail")
+        merge.assert_called_once()
+        assert log.emit.call_args[0][0] == "ticket_scope_fail_overridden_by_approval"
+
+    def test_a_scope_fail_still_holds_while_a_pr_waits(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=PRS)
+        merge = self._handle(fake_config, ts, {("api", 1): _info("reviewer-login"),
+                                               ("web", 2): _info()}, "fail")
+        merge.assert_not_called()
+
+    def test_a_pending_scope_review_still_holds(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=PRS)
+        merge = self._handle(fake_config, ts, {("api", 1): _info("reviewer-login"),
+                                               ("web", 2): _info("reviewer-login")}, "pending")
+        merge.assert_not_called()
+
+    def test_auto_merge_alone_keeps_the_scope_fail_hold(self, fake_config):
+        fake_config["pr"]["auto_merge"] = True
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=PRS)
+        merge = self._handle(fake_config, ts, {}, "fail")
+        merge.assert_not_called()
+
+
+class TestStatementCommentsNeedNoReply:
+    def test_the_check_reads_the_model_answer(self):
+        with patch("features.tickets.run_haiku", return_value='{"needs_reply": false}'):
+            assert _REAL_NO_REPLY("Review done. Approved.") is True
+        with patch("features.tickets.run_haiku", return_value='{"needs_reply": true}'):
+            assert _REAL_NO_REPLY("Why this approach?") is False
+
+    def test_no_answer_counts_as_a_reply_needed(self):
+        with patch("features.tickets.run_haiku", return_value=None):
+            assert _REAL_NO_REPLY("Approved.") is False
+        with patch("features.tickets.run_haiku", return_value="not json"):
+            assert _REAL_NO_REPLY("Approved.") is False
+
+    def _owed_entry(self, cid):
+        return {"id": cid, "comment_kind": "review_comment", "pr_repo": "api", "pr_id": 1,
+                "body": "Approved.", "status": "needs_reply"}
+
+    def test_an_owed_approval_entry_settles_and_stops_being_owed(self):
+        comment = {"id": 7, "body": "Approved.", "comment_kind": "review_comment"}
+        entry = self._owed_entry(7)
+        latest = {tickets._comment_key(comment): entry}
+        assert tickets._owed_on_pr([comment], [], [], latest) == 1
+        with patch("features.tickets._comment_needs_no_reply", return_value=True) as check, \
+             patch("features.tickets.log"):
+            tickets._settle_statement_comments(make_ticket(), make_ticket_state(), PRS[0],
+                                               [comment], latest, "b")
+            tickets._settle_statement_comments(make_ticket(), make_ticket_state(), PRS[0],
+                                               [comment], latest, "b")
+        assert entry["status"] == "no_reply_needed"
+        assert check.call_count == 1
+        assert tickets._owed_on_pr([comment], [], [], latest) == 0
+
+    def test_a_question_stays_owed_and_is_asked_once(self):
+        comment = {"id": 8, "body": "Why?", "comment_kind": "review_comment"}
+        entry = self._owed_entry(8)
+        latest = {tickets._comment_key(comment): entry}
+        with patch("features.tickets._comment_needs_no_reply", return_value=False) as check:
+            tickets._settle_statement_comments(make_ticket(), make_ticket_state(), PRS[0],
+                                               [comment], latest, "b")
+            tickets._settle_statement_comments(make_ticket(), make_ticket_state(), PRS[0],
+                                               [comment], latest, "b")
+        assert entry["status"] == "needs_reply"
+        assert check.call_count == 1
+        assert tickets._owed_on_pr([comment], [], [], latest) == 1
+
+
+class TestANewApprovalCommentDoesNotHoldTheMerge:
+    def test_a_statement_comment_is_not_owed(self, fake_config):
+        harness = comment_gate.TestMergeWaitsForComments()
+        platform = harness._platform([comment_gate._comment(body="Review done. Approved.")])
+        with patch("features.tickets._comment_needs_no_reply", return_value=True):
+            out = harness._handle(fake_config, platform)
+        assert out[tickets.RECONCILE_OWED_KEY] == 0
+        platform.merge_pr.assert_called_once_with("repo", 99)
