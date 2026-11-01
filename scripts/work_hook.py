@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.correspondence as correspondence  # noqa: E402  (needs the path above)
 import core.lsp_gate as lsp_gate  # noqa: E402  (needs the path above)
+import core.memory_git as memory_git  # noqa: E402  (needs the path above)
 import core.sleep_gate as sleep_gate  # noqa: E402  (needs the path above)
 import core.worktree_prune_gate as worktree_prune_gate  # noqa: E402  (needs the path above)
 
@@ -351,6 +352,20 @@ def main() -> int:
         kind = data.get("hook_event_name") or ""
         if not session_id or not kind:
             return 0
+        tool_input = data.get("tool_input") or {}
+        written = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
+        if kind == "PostToolUse":
+            if data.get("tool_name") in WRITE_TOOLS and written:
+                memory_git.record_write(written, session_id, data.get("tool_name") or "",
+                                        data.get("transcript_path") or "",
+                                        tool_input.get("content") or tool_input.get("new_string")
+                                        or "")
+            return 0
+        if kind == "PreToolUse" and data.get("tool_name") in WRITE_TOOLS and written:
+            try:
+                memory_git.record_pending(written, session_id)
+            except Exception as e:
+                _report_hook_error(session_id, e)
         if kind == "PreToolUse" and data.get("tool_name") == "Bash":
             reason = worktree_prune_gate.bash_reason(
                 (data.get("tool_input") or {}).get("command") or "")
