@@ -245,8 +245,17 @@ MUTATIONS = [
         "target": "tests/features/test_scope_review.py::TestInReviewScopeGate"
                   "::test_fail_blocks_auto_merge",
         "path": "features/ticket_states.py",
-        "old": '            and scope in ("disabled", "pass")):',
-        "new": "            and True):",
+        "old": '            and scope in ("disabled", "pass")\n',
+        "new": "            and True\n",
+    },
+    {
+        "label": "approval_gate_merge_open",
+        "gate": "an unapproved sibling PR holds the merge of every PR of the ticket",
+        "target": "tests/features/test_merge_approvals.py::TestMergeWhenAllApproved"
+                  "::test_one_unapproved_pr_holds_every_pr",
+        "path": "features/ticket_states.py",
+        "old": "            and not _t._hold_for_approvals(config, ticket, ts, base_url, pr_info_map)):",
+        "new": "            ):",
     },
     {
         "label": "scope_gate_scheduler_open",
