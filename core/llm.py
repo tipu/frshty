@@ -105,7 +105,9 @@ LSP_SHIM_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lsp"
 
 def with_lsp_shim(path: str | None) -> str:
     """`path` with scripts/lsp first, so an agent's TypeScript LSP plugin runs
-    the shim that keeps every request on the semantic tsserver."""
+    the shim that keeps every request on the semantic tsserver, and its
+    Python LSP plugin runs the shim that gives pyright the repository of each
+    opened file as a workspace folder."""
     return os.pathsep.join(p for p in (str(LSP_SHIM_DIR), path) if p)
 
 
