@@ -28,7 +28,7 @@ from core.beat import BeatThread
 from core.event_bus import Dispatcher
 from core.registry import Instances
 from core.worker import WorkerPool
-from services import live_check
+from services import live_check, work_dream
 
 DEFAULT_DB_PATH = db_path()
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
@@ -564,6 +564,16 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         next_run_at=next_run)
         else:
             scheduler.delete(key, "work_live_check")
+        if work_dream.enabled(c):
+            dream_at = now_pst.replace(hour=work_dream.DREAM_HOUR, minute=0, second=0,
+                                       microsecond=0)
+            if dream_at <= now_pst:
+                dream_at += timedelta(days=1)
+            scheduler.upsert_recurring(key, "work_dream", "work_dream",
+                                       cadence=f"daily_{work_dream.DREAM_HOUR}_local",
+                                       next_run_at=dream_at)
+        else:
+            scheduler.delete(key, "work_dream")
         today_cfg = c.get("today_agent") or {}
         if today_cfg.get("enabled"):
             cadence = today_cfg.get("cadence", "daily_8_local")
