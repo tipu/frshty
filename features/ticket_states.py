@@ -505,9 +505,11 @@ def _handle_in_review_ticket(
             freshness.record(key, "comments", freshness.watermark(ts),
                              instance_key=instance_key)
 
+    pr_cfg = config.get("pr", {})
     if (ts["status"] == "in_review" and ts.get("ci_passed")
-            and config.get("pr", {}).get("auto_merge")
-            and scope in ("disabled", "pass")):
+            and (pr_cfg.get("auto_merge") or pr_cfg.get("merge_when_all_approved"))
+            and scope in ("disabled", "pass")
+            and not _t._hold_for_approvals(config, ticket, ts, base_url, pr_info_map)):
         ts = _t._merge(config, ticket, ts, base_url)
     return ts, False
 
