@@ -451,9 +451,9 @@ class TestPeerTerminalProxy:
     def test_non_artifact_terminal_is_refused(self, peers_file, client, peer_terminal):
         port, seen = peer_terminal
         peers_file.write_text(f'[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:{port}"\n')
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect("/ws/peers/a/terminal/work-7"):
-                pass
+        with client.websocket_connect("/ws/peers/a/terminal/work-7") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes()
         assert exc.value.code == 1008
         assert seen == []
 
@@ -461,9 +461,9 @@ class TestPeerTerminalProxy:
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:1"\n')
         emitted = []
         monkeypatch.setattr(log, "emit", lambda event, *a, **kw: emitted.append(event))
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect("/ws/peers/a/terminal/artifact-7"):
-                pass
+        with client.websocket_connect("/ws/peers/a/terminal/artifact-7") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes()
         assert exc.value.code == 1008
         assert emitted == ["work_peer_unreachable"]
 
