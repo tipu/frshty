@@ -49,7 +49,9 @@ def test_path_outside_the_directory_is_refused(secrets, tmp_path):
     assert "leak" not in out.stdout
 
 
-def test_missing_directory_fails_clearly(tmp_path):
-    out = run(tmp_path / "absent")
-    assert out.returncode == 1
-    assert "no secrets in" in out.stderr
+def test_missing_directory_names_the_mount(tmp_path):
+    for args in ((), ("okta",)):
+        out = run(tmp_path / "absent", *args)
+        assert out.returncode == 1
+        assert "no secrets directory" in out.stderr
+        assert "instance.py up" in out.stderr

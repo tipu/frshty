@@ -28,6 +28,10 @@ def names(root: Path) -> list[str]:
 
 def main(argv: list[str]) -> int:
     root = secrets_dir()
+    if not root.is_dir():
+        print(f"no secrets directory {root}; re-run `scripts/instance.py up` on the host "
+              "to mount ~/.frshty-containers/<key>/secrets", file=sys.stderr)
+        return 1
     known = names(root)
     if not argv:
         if not known:
