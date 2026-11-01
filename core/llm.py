@@ -20,6 +20,7 @@ import jsonschema
 import core.db as _db
 import core.lsp_gate as lsp_gate
 import core.log as log
+import core.redact as redact
 import core.state as _state
 from core.job_logs import active_live_log_path, active_live_pid_path
 from core.paths import review_checkout
@@ -530,13 +531,47 @@ def _denied_tools_args(denied_tools: tuple[str, ...] | list[str] | None) -> list
     return ["--disallowedTools", ",".join([*HEADLESS_DENIED_TOOLS, *(denied_tools or ())])]
 
 
+TICKET_WORKSPACE_RULE = (
+    "Ticket workspace rule: the ticket directory is not a git repository. Each "
+    "repository is its own git worktree in a subdirectory: workspace/<repo>/ when "
+    "that directory exists, otherwise <repo>/. Run git with -C <that subdirectory>, "
+    "never in the ticket directory. Credentials are not in any rules file: run "
+    "`python3 /app/scripts/secret.py` to list the secrets this instance holds, then "
+    "`python3 /app/scripts/secret.py <name>` to print one."
+)
+
+_secret_warned: set[tuple[str, float]] = set()
+
+
+def _warn_rules_file_secrets(path: Path) -> None:
+    """Every ticket voice reads the rules file, codex and agy included, so a
+    secret written there reaches each of those vendors on every stage."""
+    try:
+        key = (str(path), path.stat().st_mtime)
+        if key in _secret_warned:
+            return
+        text = path.read_text(errors="replace")
+    except OSError:
+        return
+    _secret_warned.add(key)
+    if redact.redact_secrets(text) != text:
+        log.emit("rules_file_holds_secret",
+                 f"{path} holds a secret value; move it to the instance secrets/ folder "
+                 "and read it with scripts/secret.py",
+                 meta={"path": str(path)})
+
+
 def rules_directive(paths: list) -> str:
-    """The prompt line that names the project rules files, or "" for none."""
+    """The prompt lines that name the project rules files, followed by
+    TICKET_WORKSPACE_RULE. Only ticket stages call this."""
+    for p in paths:
+        _warn_rules_file_secrets(Path(p))
     if not paths:
-        return ""
+        return TICKET_WORKSPACE_RULE
     return ("Read every file listed below before you do anything else. Those files "
             "hold the rules of the project. Follow them for this task.\n"
-            + "\n".join(f"- {p}" for p in paths))
+            + "\n".join(f"- {p}" for p in paths)
+            + "\n\n" + TICKET_WORKSPACE_RULE)
 
 
 class ClaudeProvider(LLMProvider):

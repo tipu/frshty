@@ -24,7 +24,7 @@ import core.git_util as git_util
 import core.log as log
 from core.config import base_branch_for, get_repos, ticket_rules_files, ticket_worktree_path
 from core.consensus_plan import _fan_out, _run_stamp
-from core.llm import rules_directive
+from core.llm import TICKET_WORKSPACE_RULE, rules_directive
 from core.ticket_status import SCOPE_FIX
 
 SCOPE_FANOUT_TIMEOUT = 1800
@@ -160,7 +160,7 @@ def _write_report(ticket_dir: Path, ticket_key: str, votes: dict[str, str],
 def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
                      ticket_key: str = "") -> tuple[str | None, str]:
     """Fan the scope question out to claude/codex/agy/deepseek from one byte-identical
-    prompt (deepseek gets it without the project rules files), vote the verdicts, and write docs/scope-review.md. Returns
+    prompt (deepseek gets it without the project rules files, but with TICKET_WORKSPACE_RULE), vote the verdicts, and write docs/scope-review.md. Returns
     (verdict, reason): verdict is "pass" or "fail", or None when no voice
     produced a usable verdict. FAIL wins a tie so a split vote holds the
     ticket rather than shipping a contested branch."""
@@ -185,7 +185,7 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
 
     results = _fan_out(prompt, ticket_dir, run_dir, include_dirs,
                        SCOPE_FANOUT_TIMEOUT, voices=SCOPE_VOICES,
-                       deepseek_prompt=base_prompt)
+                       deepseek_prompt=f"{base_prompt}\n\n{TICKET_WORKSPACE_RULE}")
     votes: dict[str, str] = {}
     dropped: dict[str, str] = {}
     for name, r in results.items():
