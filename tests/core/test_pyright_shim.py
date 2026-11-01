@@ -3,8 +3,8 @@ PATH so pyright reads the project file of the repository an opened file sits
 in, and answers workspace/symbol only after it has listed the files.
 
 Uses a stub pyright-langserver later on PATH that records each message it
-reads on stdin, with the time it read it, and logs a file count a chosen time
-after `initialized`.
+reads on stdin, with the time it read it, and after `initialized` writes
+chosen log messages at chosen delays.
 """
 import json
 import os
@@ -32,13 +32,14 @@ record = open(os.environ["STUB_RECORD"], "a")
 def write(entry):
     record.write(json.dumps(entry) + "\n")
     record.flush()
-def listed():
-    time.sleep(float(os.environ["STUB_LIST_AFTER"]))
-    body = json.dumps({"jsonrpc": "2.0", "method": "window/logMessage",
-                       "params": {"type": 3, "message": "Found 3 source files"}}).encode()
-    write({"listed": time.time()})
-    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
-    sys.stdout.buffer.flush()
+def logs():
+    for delay, text in json.loads(os.environ["STUB_LOGS"]):
+        time.sleep(delay)
+        body = json.dumps({"jsonrpc": "2.0", "method": "window/logMessage",
+                           "params": {"type": 3, "message": text}}).encode()
+        write({"logged": time.time(), "text": text})
+        sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        sys.stdout.buffer.flush()
 stdin = sys.stdin.buffer
 while True:
     header = b""
@@ -49,8 +50,8 @@ while True:
         header += c
     message = json.loads(stdin.read(int(header.split(b":")[1])))
     write({"at": time.time(), "message": message})
-    if message.get("method") == "initialized" and os.environ.get("STUB_LIST_AFTER"):
-        threading.Thread(target=listed, daemon=True).start()
+    if message.get("method") == "initialized" and os.environ.get("STUB_LOGS"):
+        threading.Thread(target=logs, daemon=True).start()
 '''
 
 
@@ -77,7 +78,7 @@ SYMBOL = {"jsonrpc": "2.0", "id": 1, "method": "workspace/symbol", "params": {"q
 INITIALIZED = {"jsonrpc": "2.0", "method": "initialized", "params": {}}
 
 
-def _run(tmp_path, messages: list[dict], wait_for: int, list_after: float | None = None,
+def _run(tmp_path, messages: list[dict], wait_for: int, logs: list | None = None,
          hold_ms: int = 60000) -> list[dict]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -88,8 +89,8 @@ def _run(tmp_path, messages: list[dict], wait_for: int, list_after: float | None
     record.touch()
     env = {**os.environ, "STUB_RECORD": str(record), "FRSHTY_PYRIGHT_HOLD_MS": str(hold_ms),
            "PATH": os.pathsep.join([str(llm.LSP_SHIM_DIR), str(bin_dir), os.environ["PATH"]])}
-    if list_after is not None:
-        env["STUB_LIST_AFTER"] = str(list_after)
+    if logs is not None:
+        env["STUB_LOGS"] = json.dumps(logs)
     proc = subprocess.Popen([str(SHIM), "--stdio"], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     proc.stdin.write(b"".join(_frame(m) for m in messages))
@@ -157,10 +158,36 @@ def test_workspace_symbol_waits_for_the_file_count(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     (repo / "pyproject.toml").write_text("")
-    entries = _run(tmp_path, [_initialize(repo), INITIALIZED, SYMBOL], wait_for=3, list_after=1.0)
-    listed = next(e["listed"] for e in entries if "listed" in e)
+    entries = _run(tmp_path, [_initialize(repo), INITIALIZED, SYMBOL], wait_for=3,
+                   logs=[[0, 'Starting service instance "repo"'], [1.0, "Found 3 source files"]])
+    listed = next(e["logged"] for e in entries if e.get("text") == "Found 3 source files")
     symbol = next(e for e in entries if e.get("message", {}).get("method") == "workspace/symbol")
     assert symbol["at"] >= listed
+
+
+def test_a_file_count_without_a_started_workspace_releases_nothing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("")
+    entries = _run(tmp_path, [_initialize(repo), INITIALIZED, SYMBOL], wait_for=3,
+                   logs=[[0, "Found 9 source files"], [0, 'Starting service instance "repo"'],
+                         [1.0, "Found 3 source files"]])
+    listed = next(e["logged"] for e in entries if e.get("text") == "Found 3 source files")
+    symbol = next(e for e in entries if e.get("message", {}).get("method") == "workspace/symbol")
+    assert symbol["at"] >= listed
+
+
+def test_messages_after_a_held_request_keep_their_order(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text("")
+    edit = {"jsonrpc": "2.0", "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": (repo / "m.py").as_uri(), "version": 2},
+                       "contentChanges": [{"text": "# x\n"}]}}
+    entries = _run(tmp_path, [_initialize(repo), INITIALIZED, SYMBOL, edit], wait_for=4,
+                   logs=[[0, 'Starting service instance "repo"'], [0.5, "Found 3 source files"]])
+    methods = [m.get("method") for m in _messages(entries)]
+    assert methods[2:] == ["workspace/symbol", "textDocument/didChange"]
 
 
 def test_workspace_symbol_is_sent_after_the_hold_without_a_file_count(tmp_path):

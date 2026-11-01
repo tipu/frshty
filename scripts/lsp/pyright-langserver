@@ -15,8 +15,9 @@
  * pyright answers workspace/symbol with null until it has listed the files of
  * every workspace folder, so the first workspaceSymbol of a session answered
  * "No symbols found". The shim holds workspace/symbol, references and
- * incoming calls until pyright logs the file count of each workspace folder,
- * or for HOLD_MS.
+ * incoming calls, and every client message after them so that no edit
+ * overtakes a held request, until pyright logs the file count of each
+ * workspace folder it started, or for HOLD_MS.
  */
 const { spawn } = require("child_process");
 const fs = require("fs");
@@ -29,6 +30,7 @@ const PROJECT_FILES = ["pyrightconfig.json", "pyproject.toml"];
 const ROOT_FILES = [...PROJECT_FILES, "setup.py", "setup.cfg", "requirements.txt"];
 const HELD = new Set(["workspace/symbol", "textDocument/references", "callHierarchy/incomingCalls"]);
 const HOLD_MS = Number(process.env.FRSHTY_PYRIGHT_HOLD_MS || 60000);
+const STARTED = /^Starting service instance /;
 const LISTED = /^(Found \d+ source files?|No source files found\.?)$/;
 
 function realServer() {
@@ -93,8 +95,10 @@ child.stdin.on("error", () => {});
 let root = null;
 const folders = new Set();
 let expected = 0;
+let started = 0;
 let listed = 0;
-let held = [];
+let queue = [];
+let deadline = null;
 
 function send(stream, body) {
   stream.write(`Content-Length: ${body.length}\r\n\r\n`);
@@ -106,13 +110,10 @@ function sendMessage(message) {
 }
 
 function release(all) {
-  const now = Date.now();
-  const keep = [];
-  for (const entry of held) {
-    if (all || listed >= expected || now >= entry.deadline) send(child.stdin, entry.body);
-    else keep.push(entry);
-  }
-  held = keep;
+  if (deadline === null || !(all || listed >= expected || Date.now() >= deadline)) return;
+  for (const body of queue) send(child.stdin, body);
+  queue = [];
+  deadline = null;
 }
 
 function initialize(message) {
@@ -151,8 +152,7 @@ function fromClient(body) {
   try {
     message = JSON.parse(body.toString("utf8"));
   } catch {
-    send(child.stdin, body);
-    return;
+    message = null;
   }
   if (message && message.method === "initialize") {
     initialize(message);
@@ -161,19 +161,23 @@ function fromClient(body) {
   }
   const document = message && message.params && message.params.textDocument;
   if (document) addFolder(document.uri);
-  if (message && message.id !== undefined && HELD.has(message.method) && listed < expected) {
-    const deadline = Date.now() + HOLD_MS;
-    held.push({ body, deadline });
+  if (deadline === null && message && message.id !== undefined && HELD.has(message.method)
+      && listed < expected) {
+    deadline = Date.now() + HOLD_MS;
     setTimeout(() => release(false), HOLD_MS + 10).unref();
-    return;
   }
-  send(child.stdin, body);
+  if (deadline !== null) queue.push(body);
+  else send(child.stdin, body);
 }
 
 function fromServer(body) {
   try {
     const message = JSON.parse(body.toString("utf8"));
-    if (message && message.method === "window/logMessage" && LISTED.test(String(message.params && message.params.message))) {
+    const text = message && message.method === "window/logMessage"
+      && String(message.params && message.params.message);
+    if (text && STARTED.test(text)) started += 1;
+    if (text && LISTED.test(text) && started > 0) {
+      started -= 1;
       listed += 1;
       release(false);
     }
