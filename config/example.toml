@@ -82,6 +82,9 @@ auto_merge = false                # governs both halves of frshty. the ticket pi
 #                                 # its author. no PR merges while a sibling PR waits for approval. it
 #                                 # turns on the ticket merge without auto_merge, so /tasks merges stay
 #                                 # off. with auto_merge = true it adds the approval wait to that merge.
+#                                 # when every PR is approved, the approvals replace a failed scope
+#                                 # review. a pending scope review or an unfinished scope correction
+#                                 # still holds the merge.
 # merge_strategy = "squash"       # squash, merge, rebase
 # merge_flags = ["--admin"]       # extra flags for gh pr merge
 

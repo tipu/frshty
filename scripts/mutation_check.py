@@ -245,8 +245,8 @@ MUTATIONS = [
         "target": "tests/features/test_scope_review.py::TestInReviewScopeGate"
                   "::test_fail_blocks_auto_merge",
         "path": "features/ticket_states.py",
-        "old": '            and scope in ("disabled", "pass")\n',
-        "new": "            and True\n",
+        "old": '    scope_ok = (scope in ("disabled", "pass")\n',
+        "new": "    scope_ok = (True\n",
     },
     {
         "label": "approval_gate_merge_open",

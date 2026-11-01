@@ -3,7 +3,7 @@ import os
 import sys
 import types
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -18,6 +18,16 @@ from services import work_artifacts
 
 _SESSION_DB_PATH = None
 _SESSION_MIGRATIONS_DIR = None
+
+
+@pytest.fixture(autouse=True)
+def _no_live_no_reply_check():
+    """Keep the comment loop off a live model call for the no-reply check.
+
+    Every test that reaches the reply path would otherwise call the fast
+    model. A test that exercises the check patches it itself."""
+    with patch("features.tickets._comment_needs_no_reply", return_value=False):
+        yield
 
 
 @pytest.fixture(autouse=True)
