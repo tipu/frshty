@@ -26,6 +26,7 @@ from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_mode
 from core.ticket_status import PR_AUTOFIX
 from features.pr_ci import FILE_TOOLS_KEEP_GREEN_RULE
 from features.platforms import make_platform
+from features.pr_worktree_gc import mark_used
 
 CLAUDE_REVIEW_TIMEOUT = 900
 CODEX_REVIEW_TIMEOUT = 1200
@@ -347,6 +348,7 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
             worktree = _ensure_worktree(config, pr)
             if not worktree:
                 return _fail("could not create worktree")
+            mark_used(worktree)
 
             prompt = _review_prompt(pr, diff_text, has_tools=True)
             with ThreadPoolExecutor(max_workers=2) as pool:
