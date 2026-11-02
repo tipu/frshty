@@ -37,16 +37,33 @@ WORKTREE_DIRS = ("pr_worktrees", "autofix_worktrees")
 STAMP = ".pr-worktree-gc-stamp"
 
 
+def _reflog_time(path: str) -> float | None:
+    """The time of the last entry in the reflog at path. A reflog rewrite such
+    as `git reflog expire` changes the file time but not the entry times."""
+    try:
+        with open(path, "rb") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return None
+    for line in reversed(lines):
+        fields = line.split(b"\t", 1)[0].split()
+        if len(fields) >= 2 and fields[-2].isdigit():
+            return float(fields[-2])
+    return None
+
+
 def _last_used(worktree: str) -> float | None:
-    """The newest change to the worktree's HEAD or index. A reset, a commit
-    and a checkout each write one of them. None when git cannot name the
-    worktree's admin directory."""
+    """The newest change to the worktree's HEAD or index, or the last entry
+    of its HEAD reflog. A reset, a commit and a checkout each write one of
+    them. None when git cannot name the worktree's admin directory."""
     git_dir, _ = git_util.git_dirs(worktree)
     if not git_dir:
         return None
-    times = [os.stat(p).st_mtime for p in (os.path.join(git_dir, n) for n in
-                                           ("index", "HEAD", os.path.join("logs", "HEAD")))
+    times = [os.stat(p).st_mtime for p in (os.path.join(git_dir, n) for n in ("index", "HEAD"))
              if os.path.exists(p)]
+    logged = _reflog_time(os.path.join(git_dir, "logs", "HEAD"))
+    if logged is not None:
+        times.append(logged)
     return max(times) if times else None
 
 

@@ -34,8 +34,21 @@ def _project(tmp_path):
     return repo, state, config
 
 
+def _age_reflog(reflog: str, age: float):
+    lines = []
+    for line in Path(reflog).read_text().splitlines():
+        head, sep, msg = line.partition("\t")
+        fields = head.split(" ")
+        fields[-2] = str(int(age))
+        lines.append(" ".join(fields) + sep + msg)
+    Path(reflog).write_text("".join(ln + "\n" for ln in lines))
+
+
 def _age(path, age=OLD):
     git_dir, _ = git_util.git_dirs(path)
+    reflog = os.path.join(git_dir, "logs", "HEAD")
+    if os.path.exists(reflog):
+        _age_reflog(reflog, age)
     for name in ("index", "HEAD", os.path.join("logs", "HEAD")):
         p = os.path.join(git_dir, name)
         if os.path.exists(p):
@@ -180,3 +193,31 @@ def test_a_worktree_used_during_the_sweep_stays_locked(tmp_path):
     assert git_util.release_worktree(repo, done, still_idle=lambda: False) == \
         "used during the sweep"
     assert done.is_dir() and _locked(repo, str(done))
+
+
+def test_a_reflog_rewrite_without_a_new_entry_leaves_the_worktree_idle(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    git_dir, _ = git_util.git_dirs(done)
+    reflog = Path(git_dir) / "logs" / "HEAD"
+    assert reflog.read_text()
+    reflog.touch()
+
+    result = pr_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [str(done)], "kept": {}}
+    assert not done.exists()
+
+
+def test_a_new_reflog_entry_marks_the_worktree_used(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    git_dir, _ = git_util.git_dirs(done)
+    reflog = Path(git_dir) / "logs" / "HEAD"
+    _age_reflog(str(reflog), time.time())
+    os.utime(reflog, (OLD, OLD))
+
+    result = pr_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [], "kept": {}}
+    assert done.is_dir()
