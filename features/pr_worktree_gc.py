@@ -7,8 +7,11 @@ nothing in frshty removed them when the PR closed. They pile up: one PR
 worktree holds about 1.6 GB.
 
 `sweep` removes each of those worktrees that carries frshty's lock and was
-not used for IDLE_DAYS, through git_util.release_worktree, which keeps a
-worktree with a local change or a HEAD that no remote branch holds. Each
+not used for IDLE_DAYS, or whose branch has a PR and every such PR is merged
+or closed, through git_util.release_worktree, which keeps a worktree with a
+local change or a HEAD that no remote branch holds. The worktree directory
+is the branch with "/" replaced by "-"; the sweep reads the branch from the
+remote branch of that name, else takes the directory name. Each
 feature's _ensure_worktree adds the worktree again when its PR needs it, so
 a removed worktree of a PR that is still open costs one checkout. The reset
 and base merge that own_prs runs on each open PR worktree do not count as
@@ -33,6 +36,7 @@ import core.config as core_config
 import core.git_util as git_util
 import core.log as log
 import core.state as state
+from features.platforms import make_platform
 
 IDLE_DAYS = 3
 SWEEP_INTERVAL_S = 3600
@@ -96,9 +100,31 @@ def _idle(worktree: str, cutoff: float) -> bool:
     return used is not None and used < cutoff
 
 
+def _branches(repo_path, slug: str) -> list[str]:
+    """Every remote branch whose worktree directory is `slug`, else [slug]."""
+    listed = git_util.run_git_status(repo_path, ["for-each-ref", "--format=%(refname:lstrip=3)",
+                                                 "refs/remotes/origin"])
+    names = listed.stdout.splitlines() if listed.returncode == 0 else []
+    return [n for n in names if n.replace("/", "-") == slug] or [slug]
+
+
+def _pr_closed(platform, repo: dict, path: str) -> bool | None:
+    """True when every branch the worktree can stand for has a PR and none
+    of them is open, False when one is open or has no PR, None when the
+    platform cannot answer."""
+    try:
+        states = [platform.branch_pr_state(repo["name"], b)
+                  for b in _branches(repo["path"], Path(path).name)]
+    except Exception:
+        return None
+    if None in states:
+        return None
+    return all(st == "CLOSED" for st in states)
+
+
 def sweep(config: dict, now: float | None = None, force: bool = False,
-          dry_run: bool = False, only: set[str] | None = None) -> dict:
-    """Remove every idle PR worktree of this instance that loses nothing.
+          dry_run: bool = False, only: set[str] | None = None, platform=None) -> dict:
+    """Remove every idle or closed-PR worktree of this instance that loses nothing.
 
     A dry run removes nothing and reports what a sweep would remove and keep.
     `only`, when given, limits the sweep to those worktree paths.
@@ -116,6 +142,7 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
     cutoff = now - IDLE_DAYS * 86400
     removed: list[str] = []
     kept: dict[str, str] = {}
+    closed: list[str] = []
     for repo in core_config.get_repos(config):
         blocks = git_util.worktree_entries(repo["path"])
         if blocks is None:
@@ -136,24 +163,38 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
             if used is None:
                 kept[path] = "admin directory not found"
                 continue
+            still_idle = lambda p=path: _idle(p, cutoff)
             if not _idle(path, cutoff):
-                continue
+                if platform is None:
+                    try:
+                        platform = make_platform(config)
+                    except Exception as e:
+                        kept[path] = f"no platform to read the PR state: {e}"[:200]
+                        continue
+                pr_closed = _pr_closed(platform, repo, path)
+                if pr_closed is None:
+                    kept[path] = "PR state query failed"
+                    continue
+                if not pr_closed:
+                    continue
+                closed.append(path)
+                still_idle = lambda p=path, u=used: _last_used(p) == u
             if dry_run:
                 reason = git_util.worktree_loss(path)
             else:
-                reason = git_util.release_worktree(repo["path"], path,
-                                                   still_idle=lambda p=path: _idle(p, cutoff))
+                reason = git_util.release_worktree(repo["path"], path, still_idle=still_idle)
             if reason:
                 kept[path] = reason
             else:
                 removed.append(path)
     key = config["job"]["key"]
     if removed and not dry_run:
-        log.emit("pr_worktree_gc", f"Removed {len(removed)} idle PR worktree(s)",
-                 meta={"removed": removed}, job=key, instance_key=key)
+        log.emit("pr_worktree_gc", f"Removed {len(removed)} idle or closed-PR worktree(s)",
+                 meta={"removed": removed, "closed": [p for p in removed if p in closed]},
+                 job=key, instance_key=key)
     if kept and not dry_run:
         log.emit("pr_worktree_gc_kept",
-                 f"Kept {len(kept)} idle PR worktree(s) that frshty could not remove",
+                 f"Kept {len(kept)} idle or closed-PR worktree(s) that frshty could not remove",
                  meta={"kept": kept}, job=key, instance_key=key)
     return {"removed": removed, "kept": kept}
 
