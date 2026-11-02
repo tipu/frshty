@@ -95,18 +95,17 @@ def test_removes_the_worktree_of_a_closed_pr_and_keeps_its_review_files(tmp_path
 
     result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
-    assert sorted(result["removed"]) == sorted([str(merged), str(closed), str(declined)])
-    assert result["kept"] == {str(dirty): "local changes",
-                              str(nofile): "no review file names the PR"}
-    for path in (merged, closed, declined):
+    assert sorted(result["removed"]) == sorted([str(merged), str(closed), str(declined), str(nofile)])
+    assert result["kept"] == {str(dirty): "local changes"}
+    for path in (merged, closed, declined, nofile):
         assert not path.exists()
         assert not _listed(repo, str(path))
         assert (path.parent / "diff.txt").read_text() == "diff"
+    for path in (merged, closed, declined):
         assert (path.parent / "queued_comments.json").exists()
     assert (merged.parent / "review.json").exists()
     assert still_open.is_dir() and _listed(repo, str(still_open))
     assert (dirty / "a.txt").read_text() == "changed\n"
-    assert nofile.is_dir()
     assert ("app", 3) in platform.asked
 
 
@@ -134,6 +133,22 @@ def test_skips_a_worktree_a_review_used_recently(tmp_path, monkeypatch):
 def test_skips_a_worktree_a_new_review_just_reset(tmp_path, monkeypatch):
     repo, state, config, platform = _project(tmp_path, monkeypatch, {1: "MERGED"})
     merged = _review(repo, state, "merged", 1)
+    _git(merged, "reset", "--hard", "origin/merged")
+
+    result = review_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [], "kept": {}}
+    assert merged.is_dir() and platform.asked == []
+
+
+def test_a_reset_after_an_old_checkout_counts_as_use(tmp_path, monkeypatch):
+    repo, state, config, platform = _project(tmp_path, monkeypatch, {1: "MERGED"})
+    merged = _review(repo, state, "merged", 1)
+    git_dir, _ = git_util.git_dirs(merged)
+    reflog = Path(git_dir, "logs", "HEAD")
+    head, _, message = reflog.read_text().splitlines()[0].partition("\t")
+    fields = head.rsplit(" ", 2)
+    reflog.write_text(f"{fields[0]} {int(OLD)} {fields[2]}\t{message}\n")
     _git(merged, "reset", "--hard", "origin/merged")
 
     result = review_worktree_gc.sweep(config, force=True)
