@@ -10,7 +10,10 @@ worktree holds about 1.6 GB.
 not used for IDLE_DAYS, through git_util.release_worktree, which keeps a
 worktree with a local change or a HEAD that no remote branch holds. Each
 feature's _ensure_worktree adds the worktree again when its PR needs it, so
-a removed worktree of a PR that is still open costs one checkout.
+a removed worktree of a PR that is still open costs one checkout. The reset
+and base merge that own_prs runs on each open PR worktree do not count as
+use, so the worktree of an open PR that nobody works on is removed too. A
+job that works in the worktree after that reset calls mark_used first.
 
 The cron fan-out routes the sweep to every instance with review_prs or
 pr_autofix. It runs at most once per SWEEP_INTERVAL_S. Run it by hand for an
@@ -35,18 +38,56 @@ IDLE_DAYS = 3
 SWEEP_INTERVAL_S = 3600
 WORKTREE_DIRS = ("pr_worktrees", "autofix_worktrees")
 STAMP = ".pr-worktree-gc-stamp"
+USED_MARK = "frshty-used"
+REFRESH_ENTRIES = ("reset: moving to origin/", "merge origin/", "commit (merge): ")
+
+
+def mark_used(worktree) -> None:
+    """Record that a job starts to work in the worktree. The reset that
+    precedes the job does not count as use, so without this mark a sweep
+    can remove the worktree under the job."""
+    git_dir, _ = git_util.git_dirs(worktree)
+    if git_dir:
+        Path(git_dir, USED_MARK).touch()
+
+
+def _reflog_entries(git_dir: str) -> list[tuple[float, str]]:
+    """(time, message) of each entry in the worktree's HEAD reflog."""
+    try:
+        lines = Path(git_dir, "logs", "HEAD").read_text(errors="replace").splitlines()
+    except OSError:
+        return []
+    entries = []
+    for line in lines:
+        head, _, message = line.partition("\t")
+        fields = head.rsplit(" ", 2)
+        try:
+            entries.append((float(fields[-2]), message))
+        except (IndexError, ValueError):
+            continue
+    return entries
 
 
 def _last_used(worktree: str) -> float | None:
-    """The newest change to the worktree's HEAD or index. A reset, a commit
-    and a checkout each write one of them. None when git cannot name the
-    worktree's admin directory."""
+    """The newest HEAD reflog entry that is not an own_prs refresh, or the
+    newest mark_used, whichever is later. own_prs resets each open PR
+    worktree to its branch and merges the base into it, and those entries do
+    not count as use. When every entry is a refresh, the oldest entry counts.
+    Without a reflog, the newest change to the HEAD or index file counts.
+    None when git cannot name the worktree's admin directory."""
     git_dir, _ = git_util.git_dirs(worktree)
     if not git_dir:
         return None
-    times = [os.stat(p).st_mtime for p in (os.path.join(git_dir, n) for n in
-                                           ("index", "HEAD", os.path.join("logs", "HEAD")))
-             if os.path.exists(p)]
+    entries = _reflog_entries(git_dir)
+    if entries:
+        used = [t for t, message in entries if not message.startswith(REFRESH_ENTRIES)]
+        times = [max(used) if used else min(t for t, _ in entries)]
+        names = (USED_MARK,)
+    else:
+        times = []
+        names = ("index", "HEAD", USED_MARK)
+    times += [os.stat(p).st_mtime for p in (os.path.join(git_dir, n) for n in names)
+              if os.path.exists(p)]
     return max(times) if times else None
 
 
