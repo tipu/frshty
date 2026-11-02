@@ -206,3 +206,114 @@ def test_the_pr_board_counts_a_no_reply_comment_as_done():
     entries = [{"pr_repo": "api", "pr_id": 1, "status": "no_reply_needed"}]
     assert web_tickets._pr_comment_breakdown(entries, "api", 1) == {
         "done": 1, "not_done": 0, "discuss": 0}
+
+
+GREEN = [{"name": "build", "state": "SUCCESS", "url": ""}]
+RED = [{"name": "build", "state": "FAILED", "url": ""}]
+
+
+def _merge_foreign(config, ts, infos, checks):
+    platform = MagicMock()
+    platform.get_pr_info.side_effect = lambda repo, pr_id: infos[(repo, pr_id)]
+    platform.get_pr_checks.side_effect = lambda repo, pr_id: checks[(repo, pr_id)]
+    platform.merge_pr.return_value = {}
+    with patch("features.tickets.make_platform", return_value=platform), \
+         patch("features.tickets._fetch_ticket_comments", return_value=[]), \
+         patch("features.tickets.log"):
+        out = tickets._merge_approved_foreign_prs(config, make_ticket(), ts, "http://base")
+    return out, platform
+
+
+class TestMergeApprovedForeignPrs:
+    def _ts(self, status="pr_ready"):
+        return make_ticket_state(status=status, foreign_prs=[dict(p) for p in PRS])
+
+    def test_merges_every_approved_green_pr_and_marks_the_ticket_merged(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        out, platform = _merge_foreign(
+            fake_config, self._ts(),
+            {("api", 1): _info("reviewer-login"), ("web", 2): _info("reviewer-login")},
+            {("api", 1): GREEN, ("web", 2): GREEN})
+        assert platform.merge_pr.call_count == 2
+        assert out["status"] == "merged"
+        assert "foreign_prs" not in out
+        assert [p["id"] for p in out["prs"]] == [1, 2]
+
+    def test_failing_ci_holds_every_pr(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        out, platform = _merge_foreign(
+            fake_config, self._ts(),
+            {("api", 1): _info("reviewer-login"), ("web", 2): _info("reviewer-login")},
+            {("api", 1): GREEN, ("web", 2): RED})
+        platform.merge_pr.assert_not_called()
+        assert out["status"] == "pr_ready"
+        assert out["foreign_prs"] == PRS
+
+    def test_pending_or_missing_ci_holds(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        for checks in (None, [], [{"name": "build", "state": "INPROGRESS", "url": ""}]):
+            _, platform = _merge_foreign(
+                fake_config, self._ts(),
+                {("api", 1): _info("reviewer-login"), ("web", 2): _info("reviewer-login")},
+                {("api", 1): GREEN, ("web", 2): checks})
+            platform.merge_pr.assert_not_called()
+
+    def test_one_unapproved_pr_holds_every_pr(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        _, platform = _merge_foreign(
+            fake_config, self._ts(),
+            {("api", 1): _info("reviewer-login"), ("web", 2): _info("author-login")},
+            {("api", 1): GREEN, ("web", 2): GREEN})
+        platform.merge_pr.assert_not_called()
+
+    def test_a_declined_pr_does_not_block_the_approved_one(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        declined = {**_info(), "state": "DECLINED"}
+        out, platform = _merge_foreign(
+            fake_config, self._ts(),
+            {("api", 1): _info("reviewer-login"), ("web", 2): declined},
+            {("api", 1): GREEN, ("web", 2): RED})
+        platform.merge_pr.assert_called_once_with("api", 1)
+        assert out["status"] == "merged"
+        assert [p["id"] for p in out["prs"]] == [1]
+
+    def test_rule_off_does_nothing(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = False
+        out, platform = _merge_foreign(
+            fake_config, self._ts(),
+            {("api", 1): _info("reviewer-login"), ("web", 2): _info("reviewer-login")},
+            {("api", 1): GREEN, ("web", 2): GREEN})
+        platform.merge_pr.assert_not_called()
+        assert out["foreign_prs"] == PRS
+
+    def test_a_merge_error_keeps_the_hold(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        platform = MagicMock()
+        platform.get_pr_info.return_value = _info("reviewer-login")
+        platform.get_pr_checks.return_value = GREEN
+        platform.merge_pr.return_value = {"error": "conflict"}
+        with patch("features.tickets.make_platform", return_value=platform), \
+             patch("features.tickets.log"):
+            out = tickets._merge_approved_foreign_prs(fake_config, make_ticket(), self._ts(), "b")
+        assert out["status"] == "pr_ready"
+        assert out["foreign_prs"] == PRS
+
+    def test_a_status_that_cannot_reach_merged_keeps_the_hold_for_release(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        out, platform = _merge_foreign(
+            fake_config, self._ts(status="planning"),
+            {("api", 1): _info("reviewer-login"), ("web", 2): _info("reviewer-login")},
+            {("api", 1): GREEN, ("web", 2): GREEN})
+        assert platform.merge_pr.call_count == 2
+        assert out["status"] == "planning"
+        assert out["foreign_prs"] == PRS
+
+    def test_an_unreadable_pr_state_holds_every_pr(self, fake_config):
+        fake_config["pr"]["merge_when_all_approved"] = True
+        for unknown in ({}, {"state": None}, {"state": "WEIRD"}):
+            out, platform = _merge_foreign(
+                fake_config, self._ts(),
+                {("api", 1): _info("reviewer-login"), ("web", 2): unknown},
+                {("api", 1): GREEN, ("web", 2): GREEN})
+            platform.merge_pr.assert_not_called()
+            assert out["foreign_prs"] == PRS

@@ -1533,6 +1533,8 @@ def check(config: dict, instance_key: str = ""):
             if ts.get(state.FOREIGN_PRS_KEY):
                 ts = _release_foreign_pr_hold(config, key, ts, base_url)
             if ts.get(state.FOREIGN_PRS_KEY):
+                ts = _merge_approved_foreign_prs(config, ticket, ts, base_url)
+            if ts.get(state.FOREIGN_PRS_KEY):
                 _save_ticket_if_unmoved(key, ts, loaded_status)
                 continue
 
@@ -3200,6 +3202,68 @@ def _release_foreign_pr_hold(config: dict, key: str, ts: dict, base_url: str) ->
     return ts
 
 
+_KNOWN_PR_STATES = frozenset({"OPEN", "MERGED", "DECLINED", "CLOSED", "SUPERSEDED", "DELETED"})
+
+
+def _merge_approved_foreign_prs(config: dict, ticket: dict, ts: dict, base_url: str) -> dict:
+    """Merge the open PRs a ticket is held behind under [pr] merge_when_all_approved.
+
+    The hold waits for a person, and an approval from an account other than
+    the PR author is that person. The merge runs only when every open held PR
+    is approved and its CI reports passing; an unread state, an unapproved PR
+    or a failing, pending or missing check keeps the whole hold. When every
+    held PR ends merged or declined, the merged ones become the ticket's PRs
+    and the ticket moves to merged."""
+    if not config.get("pr", {}).get("merge_when_all_approved"):
+        return ts
+    key = ticket["key"]
+    held = ts.get(state.FOREIGN_PRS_KEY) or []
+    platform = make_platform(config)
+    infos = {}
+    for p in held:
+        try:
+            infos[(p["repo"], p["id"])] = platform.get_pr_info(p["repo"], p["id"]) or {}
+        except Exception as e:
+            log.emit("ticket_foreign_pr_state_failed",
+                f"{key}: could not read held PR {p['repo']}#{p['id']}, the ticket stays held: {e}",
+                links={"detail": f"{base_url}/tickets/{key}", "pr": p.get("url", "")},
+                meta={"ticket": key, "repo": p["repo"], "pr_id": p["id"]})
+            return ts
+    if any(info.get("state") not in _KNOWN_PR_STATES for info in infos.values()):
+        return ts
+    open_held = [p for p in held if infos[(p["repo"], p["id"])].get("state") == "OPEN"]
+    if not open_held:
+        return ts
+    for p in open_held:
+        if not _pr_approved(infos[(p["repo"], p["id"])]):
+            return ts
+        try:
+            checks = platform.get_pr_checks(p["repo"], p["id"])
+        except Exception:
+            checks = None
+        if ci_summary(checks) != "passing":
+            return ts
+    merged = [p for p in held if infos[(p["repo"], p["id"])].get("state") == "MERGED"]
+    for p in open_held:
+        result = platform.merge_pr(p["repo"], p["id"])
+        if result.get("error"):
+            log.emit("ticket_merge_error",
+                f"{_label(key, ts)}: Failed to merge approved PR #{p['id']} in {p['repo']}: {result['error']}",
+                links={"detail": f"{base_url}/tickets/{key}", "pr": p.get("url", "")},
+                meta={"ticket": key, "repo": p["repo"], "pr_id": p["id"], "error": result["error"]})
+            return ts
+        log.emit("ticket_pr_merged",
+            f"{_label(key, ts)}: Merged approved PR #{p['id']} in {p['repo']} that frshty did not open",
+            links={"detail": f"{base_url}/tickets/{key}", "pr": p.get("url", "")},
+            meta={"ticket": key, "repo": p["repo"], "pr_id": p["id"], "foreign": True})
+        merged.append(p)
+    if not can_transition(ts.get("status", "new"), "merged"):
+        return ts
+    ts.pop(state.FOREIGN_PRS_KEY, None)
+    ts["prs"] = merged
+    return _mark_ticket_merged(config, ticket, ts)
+
+
 def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "",
                    first_sighting: bool = False) -> dict:
     matches = [p for p in open_prs if p.get("branch") == ts.get("branch")]
@@ -3547,10 +3611,14 @@ def _unapproved_prs(config, ts, pr_info_map=None) -> list[dict]:
     out = []
     for pr in ts.get("prs", []):
         info = _get_pr_info(platform, pr_info_map, pr["repo"], pr["id"])
-        author = info.get("author_id", "")
-        if not author or not any(a and a != author for a in info.get("approver_ids") or []):
+        if not _pr_approved(info):
             out.append(pr)
     return out
+
+
+def _pr_approved(info: dict) -> bool:
+    author = info.get("author_id", "")
+    return bool(author) and any(a and a != author for a in info.get("approver_ids") or [])
 
 
 def _hold_for_approvals(config, ticket, ts, base_url, pr_info_map=None) -> bool:
