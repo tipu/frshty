@@ -1026,6 +1026,7 @@ class TestAutoReviewRouting:
         tasks = self._tasks({"review_prs": True, "auto_review": False})
         assert "poll_own_prs" in tasks
         assert "poll_peer_reviews" in tasks
+        assert "review_worktree_gc" in tasks
 
     def test_the_poll_is_gated_by_the_flag_at_the_task_too(self):
         from core.tasks.registry import get_task
