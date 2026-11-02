@@ -124,6 +124,12 @@ def pr_worktree_gc(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts=pr_worktree_gc.sweep(ctx.config))
 
 
+@task("review_worktree_gc", timeout=1800)
+def review_worktree_gc(ctx: TaskContext) -> TaskResult:
+    from features import review_worktree_gc
+    return TaskResult("ok", artifacts=review_worktree_gc.sweep(ctx.config))
+
+
 @task("tmp_gc", timeout=600)
 def tmp_gc(ctx: TaskContext) -> TaskResult:
     from features import tmp_gc
