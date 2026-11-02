@@ -32,6 +32,7 @@ from core.consensus_scope import (
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.ticket_status import SCOPE_FIX, TEST_FIX
 import features.defence as defence
+import features.pr_steward as pr_steward
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
     repo_gate_clear,
@@ -3269,3 +3270,9 @@ def substantiate_reply(ctx: TaskContext) -> TaskResult:
 
     ft.record_defence_result(ctx.config, slug, comment_id, result)
     return TaskResult("ok", artifacts={"verdict": result.get("verdict", defence.INCONCLUSIVE)})
+
+
+@task(pr_steward.TASK, timeout=pr_steward.STEWARD_TIMEOUT + 120)
+def run_pr_steward(ctx: TaskContext) -> TaskResult:
+    status, reason = pr_steward.run_shadow(ctx.config, ctx.payload)
+    return TaskResult(status, reason)

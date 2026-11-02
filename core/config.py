@@ -75,6 +75,10 @@ def load_config(path: str) -> dict:
     raw["pr"].setdefault("merge_when_all_approved", False)
     raw["pr"].setdefault("merge_strategy", "squash")
     raw["pr"].setdefault("merge_flags", [])
+    raw["pr"].setdefault("steward", "off")
+    if raw["pr"]["steward"] not in ("off", "shadow"):
+        raise ValueError(f"{path}: pr.steward must be \"off\" or \"shadow\", "
+                         f"not {raw['pr']['steward']!r}")
 
     raw["commits"].setdefault("key_first", False)
 
