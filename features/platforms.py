@@ -545,6 +545,22 @@ class BitbucketPlatform(_CIMonitorMixin):
                 return {"status": "resolved"}
             return {"status": "error", "detail": resp.text}
 
+    def branch_pr_state(self, repo: str, branch: str) -> str | None:
+        """"OPEN" when a PR whose source is `branch` is open, "CLOSED" when
+        one exists and none is open, "NONE" when none exists, None when the
+        query fails."""
+        url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
+        q = ("q", f'source.branch.name="{branch}"')
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
+            for states, answer in ((("OPEN",), "OPEN"),
+                                   (("MERGED", "DECLINED", "SUPERSEDED"), "CLOSED")):
+                resp = client.get(url, params=[q, ("pagelen", "1"), *(("state", st) for st in states)])
+                if resp.status_code != 200:
+                    return None
+                if resp.json().get("values"):
+                    return answer
+        return "NONE"
+
     def get_pr_branch(self, repo: str, pr_id: int) -> str:
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}")
@@ -1132,6 +1148,22 @@ class GitHubPlatform(_CIMonitorMixin):
         if result.returncode == 0:
             return {"status": "resolved"}
         return {"status": "error", "detail": result.stderr}
+
+    def branch_pr_state(self, repo: str, branch: str) -> str | None:
+        """"OPEN" when a PR whose head is `branch` is open, "CLOSED" when one
+        exists and none is open, "NONE" when none exists, None when the query
+        fails."""
+        for state, answer in (("open", "OPEN"), ("all", "CLOSED")):
+            result = self._run_gh(["pr", "list", "--repo", self._resolve_repo(repo), "--head", branch,
+                                   "--state", state, "--json", "number", "--limit", "1"])
+            if result.returncode != 0:
+                return None
+            try:
+                if json.loads(result.stdout):
+                    return answer
+            except json.JSONDecodeError:
+                return None
+        return "NONE"
 
     def get_pr_branch(self, repo: str, pr_id: int) -> str:
         full = self._resolve_repo(repo)
