@@ -10,6 +10,10 @@ from features import review_worktree_gc
 OLD = time.time() - review_worktree_gc.IDLE_S - 3600
 
 
+def _later() -> float:
+    return time.time() + review_worktree_gc.IDLE_S + 3600
+
+
 def _git(cwd: Path, *args: str) -> str:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
                           check=True).stdout
@@ -89,7 +93,7 @@ def test_removes_the_worktree_of_a_closed_pr_and_keeps_its_review_files(tmp_path
     nofile = _review(repo, state, "nofile", None)
     declined = _review(repo, state, "declined", 6)
 
-    result = review_worktree_gc.sweep(config, force=True)
+    result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
     assert sorted(result["removed"]) == sorted([str(merged), str(closed), str(declined)])
     assert result["kept"] == {str(dirty): "local changes",
@@ -111,7 +115,7 @@ def test_keeps_the_worktree_while_any_pr_of_the_branch_is_open(tmp_path, monkeyp
     merged = _review(repo, state, "merged", 1)
     (merged.parent / "review.codex.json").write_text(json.dumps({"pr_id": 2}))
 
-    result = review_worktree_gc.sweep(config, force=True)
+    result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
     assert result == {"removed": [], "kept": {}}
     assert merged.is_dir()
@@ -127,12 +131,23 @@ def test_skips_a_worktree_a_review_used_recently(tmp_path, monkeypatch):
     assert merged.is_dir() and platform.asked == []
 
 
+def test_skips_a_worktree_a_new_review_just_reset(tmp_path, monkeypatch):
+    repo, state, config, platform = _project(tmp_path, monkeypatch, {1: "MERGED"})
+    merged = _review(repo, state, "merged", 1)
+    _git(merged, "reset", "--hard", "origin/merged")
+
+    result = review_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [], "kept": {}}
+    assert merged.is_dir() and platform.asked == []
+
+
 def test_keeps_the_worktree_when_a_review_file_cannot_be_read(tmp_path, monkeypatch):
     repo, state, config, _ = _project(tmp_path, monkeypatch, {1: "MERGED"})
     merged = _review(repo, state, "merged", 1)
     (merged.parent / "review.codex.json").write_text("{\"pr_id\": 2")
 
-    result = review_worktree_gc.sweep(config, force=True)
+    result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
     assert result == {"removed": [], "kept": {str(merged): "a review file cannot be read"}}
     assert merged.is_dir()
@@ -142,7 +157,7 @@ def test_keeps_the_worktree_when_the_state_lookup_fails(tmp_path, monkeypatch):
     repo, state, config, _ = _project(tmp_path, monkeypatch, {1: RuntimeError("gh down")})
     merged = _review(repo, state, "merged", 1)
 
-    result = review_worktree_gc.sweep(config, force=True)
+    result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
     assert result == {"removed": [], "kept": {str(merged): "PR state lookup failed: gh down"}}
     assert merged.is_dir()
@@ -153,7 +168,7 @@ def test_leaves_worktrees_outside_the_review_folders(tmp_path, monkeypatch):
     other = state / "pr_worktrees" / "merged"
     assert git_util.add_detached_worktree(repo, other, "merged") == other
 
-    result = review_worktree_gc.sweep(config, force=True)
+    result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
     assert result == {"removed": [], "kept": {}}
     assert other.is_dir() and platform.asked == []
@@ -163,7 +178,7 @@ def test_dry_run_removes_nothing(tmp_path, monkeypatch):
     repo, state, config, _ = _project(tmp_path, monkeypatch, {1: "MERGED"})
     merged = _review(repo, state, "merged", 1)
 
-    result = review_worktree_gc.sweep(config, dry_run=True)
+    result = review_worktree_gc.sweep(config, now=_later(), dry_run=True)
 
     assert result == {"removed": [str(merged)], "kept": {}}
     assert merged.is_dir() and _listed(repo, str(merged))
@@ -174,7 +189,7 @@ def test_only_limits_the_sweep(tmp_path, monkeypatch):
     merged = _review(repo, state, "merged", 1)
     closed = _review(repo, state, "closed", 2)
 
-    result = review_worktree_gc.sweep(config, force=True, only={str(merged)})
+    result = review_worktree_gc.sweep(config, now=_later(), force=True, only={str(merged)})
 
     assert result == {"removed": [str(merged)], "kept": {}}
     assert closed.is_dir()
