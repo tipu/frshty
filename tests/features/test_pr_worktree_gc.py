@@ -345,3 +345,17 @@ def test_a_job_that_marks_the_worktree_used_keeps_it(tmp_path):
 
     assert result == {"removed": [], "kept": {}}
     assert done.is_dir()
+
+
+def test_a_reflog_rewrite_without_a_new_entry_leaves_the_worktree_idle(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    git_dir, _ = git_util.git_dirs(done)
+    reflog = Path(git_dir) / "logs" / "HEAD"
+    assert reflog.read_text()
+    reflog.touch()
+
+    result = pr_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [str(done)], "kept": {}}
+    assert not done.exists()
