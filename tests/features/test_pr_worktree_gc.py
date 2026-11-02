@@ -5,8 +5,19 @@ from pathlib import Path
 
 import core.git_util as git_util
 from features import pr_worktree_gc
+from features.platforms import GitHubPlatform
 
 OLD = time.time() - (pr_worktree_gc.IDLE_DAYS + 1) * 86400
+
+
+class _Platform:
+    def __init__(self, states=None):
+        self.states = states or {}
+        self.asked = []
+
+    def branch_pr_state(self, repo, branch):
+        self.asked.append((repo, branch))
+        return self.states.get(branch, "NONE")
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -83,7 +94,7 @@ def test_removes_an_idle_pushed_clean_worktree_and_keeps_the_rest(tmp_path):
          "-m", "unpushed")
     _age(local)
 
-    result = pr_worktree_gc.sweep(config, force=True)
+    result = pr_worktree_gc.sweep(config, force=True, platform=_Platform({"fresh": "OPEN"}))
 
     assert result["removed"] == [str(done)]
     assert result["kept"] == {str(dirty): "local changes",
@@ -217,7 +228,107 @@ def test_a_new_reflog_entry_marks_the_worktree_used(tmp_path):
     _age_reflog(str(reflog), time.time())
     os.utime(reflog, (OLD, OLD))
 
-    result = pr_worktree_gc.sweep(config, force=True)
+    result = pr_worktree_gc.sweep(config, force=True, platform=_Platform({"done": "OPEN"}))
 
     assert result == {"removed": [], "kept": {}}
     assert done.is_dir()
+
+
+def test_removes_a_worktree_of_a_merged_or_closed_pr_without_the_idle_wait(tmp_path):
+    repo, state, config = _project(tmp_path)
+    merged = _add(repo, state, "pr_worktrees", "done", age=time.time())
+    closed = _add(repo, state, "autofix_worktrees", "fresh", age=time.time())
+    reopened = _add(repo, state, "pr_worktrees", "local", age=time.time())
+    platform = _Platform({"done": "CLOSED", "fresh": "CLOSED", "local": "OPEN"})
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=platform)
+
+    assert sorted(result["removed"]) == sorted([str(merged), str(closed)])
+    assert result["kept"] == {}
+    assert not merged.exists() and not closed.exists()
+    assert reopened.is_dir() and _locked(repo, str(reopened))
+
+
+def test_keeps_a_closed_pr_worktree_with_local_changes(tmp_path):
+    repo, state, config = _project(tmp_path)
+    dirty = _add(repo, state, "pr_worktrees", "dirty", age=time.time())
+    (dirty / "new.txt").write_text("work")
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=_Platform({"dirty": "CLOSED"}))
+
+    assert result == {"removed": [], "kept": {str(dirty): "local changes"}}
+    assert (dirty / "new.txt").read_text() == "work"
+    assert _locked(repo, str(dirty))
+
+
+def test_keeps_a_recent_worktree_whose_branch_has_no_pr(tmp_path):
+    repo, state, config = _project(tmp_path)
+    fresh = _add(repo, state, "pr_worktrees", "fresh", age=time.time())
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=_Platform())
+
+    assert result == {"removed": [], "kept": {}}
+    assert fresh.is_dir()
+
+
+def test_reports_a_recent_worktree_whose_pr_state_is_unknown(tmp_path):
+    repo, state, config = _project(tmp_path)
+    fresh = _add(repo, state, "pr_worktrees", "fresh", age=time.time())
+
+    class Failing(_Platform):
+        def branch_pr_state(self, repo, branch):
+            return None
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=Failing())
+
+    assert result == {"removed": [], "kept": {str(fresh): "PR state query failed"}}
+    assert fresh.is_dir()
+
+
+def test_reads_a_slashed_branch_from_the_remote_branch(tmp_path):
+    repo, state, config = _project(tmp_path)
+    _git(repo, "push", "origin", "main:feat/x")
+    _git(repo, "fetch", "origin")
+    path = state / "pr_worktrees" / "feat-x"
+    assert git_util.add_detached_worktree(repo, path, "feat/x") == path
+    platform = _Platform({"feat/x": "CLOSED"})
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=platform)
+
+    assert platform.asked == [("app", "feat/x")]
+    assert result == {"removed": [str(path)], "kept": {}}
+
+
+def test_keeps_a_worktree_when_another_branch_shares_its_directory_name(tmp_path):
+    repo, state, config = _project(tmp_path)
+    _git(repo, "push", "origin", "main:feat/x", "main:feat-x")
+    _git(repo, "fetch", "origin")
+    path = state / "pr_worktrees" / "feat-x"
+    assert git_util.add_detached_worktree(repo, path, "feat/x") == path
+    platform = _Platform({"feat-x": "CLOSED", "feat/x": "OPEN"})
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=platform)
+
+    assert sorted(platform.asked) == [("app", "feat-x"), ("app", "feat/x")]
+    assert result == {"removed": [], "kept": {}}
+    assert path.is_dir()
+
+
+def test_github_reports_an_open_pr_before_the_closed_ones(monkeypatch):
+    gh = GitHubPlatform({"github": {"repo": "org/app"}, "workspace": {}})
+    answers = {"open": "[{\"number\": 3}]", "all": "[{\"number\": 1}]"}
+    asked = []
+
+    def run_gh(args):
+        state = args[args.index("--state") + 1]
+        asked.append(state)
+        return subprocess.CompletedProcess(args, 0, answers[state], "")
+
+    monkeypatch.setattr(gh, "_run_gh", run_gh)
+    assert gh.branch_pr_state("app", "feat/x") == "OPEN"
+    answers["open"] = "[]"
+    assert gh.branch_pr_state("app", "feat/x") == "CLOSED"
+    answers["all"] = "[]"
+    assert gh.branch_pr_state("app", "feat/x") == "NONE"
+    monkeypatch.setattr(gh, "_run_gh", lambda args: subprocess.CompletedProcess(args, 1, "", "boom"))
+    assert gh.branch_pr_state("app", "feat/x") is None
