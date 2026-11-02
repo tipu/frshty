@@ -8,7 +8,8 @@ closed. One review worktree holds several GB.
 PR on the same branch resets the worktree before it writes the PR's id. It
 asks the platform for the state of each PR that a review folder records in
 review*.json or queued_comments*.json. When every one of them is merged or
-closed, it removes the worktree through git_util.release_worktree, which runs
+closed, or when no review file names a PR, it removes the worktree through
+git_util.release_worktree, which runs
 `git worktree remove` and keeps a worktree with a local change or a HEAD that
 no remote branch holds. It removes only the worktree directory: review.json,
 queued_comments*.json and diff.txt stay, because /reviews and
@@ -32,13 +33,30 @@ import core.config as core_config
 import core.git_util as git_util
 import core.log as log
 import core.state as state
-from features import pr_worktree_gc
 from features.platforms import make_platform
 
 IDLE_S = 86400
 SWEEP_INTERVAL_S = 3600
 CLOSED_STATES = ("MERGED", "CLOSED", "DECLINED", "SUPERSEDED")
 STAMP = ".review-worktree-gc-stamp"
+
+
+def _last_used(worktree: str) -> float | None:
+    """The newest change to the worktree's HEAD or index. The reset that
+    starts a review rewrites the index. The HEAD reflog does not count,
+    because `git gc` rewrites it. None when git cannot name the worktree's
+    admin directory."""
+    git_dir, _ = git_util.git_dirs(worktree)
+    if not git_dir:
+        return None
+    times = [os.stat(p).st_mtime for p in (os.path.join(git_dir, n) for n in ("index", "HEAD"))
+             if os.path.exists(p)]
+    return max(times) if times else None
+
+
+def _idle(worktree: str, cutoff: float) -> bool:
+    used = _last_used(worktree)
+    return used is not None and used < cutoff
 
 
 def _pr_ids(review_dir: Path) -> set[int] | None:
@@ -102,32 +120,30 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
                 continue
             if f"locked {git_util.WORKTREE_LOCK_REASON}" not in lines or not os.path.isdir(path):
                 continue
-            if pr_worktree_gc._last_used(path) is None:
+            if _last_used(path) is None:
                 kept[path] = "admin directory not found"
                 continue
-            if not pr_worktree_gc._idle(path, cutoff):
+            if not _idle(path, cutoff):
                 continue
             pr_ids = _pr_ids(real.parent)
             if pr_ids is None:
                 kept[path] = "a review file cannot be read"
                 continue
-            if not pr_ids:
-                kept[path] = "no review file names the PR"
-                continue
-            if platform is None:
-                platform = make_platform(config)
-            try:
-                pr_states = [platform.get_pr_state(repo["name"], i) for i in sorted(pr_ids)]
-            except Exception as e:
-                kept[path] = f"PR state lookup failed: {str(e)[:200]}"
-                continue
-            if not all(s in CLOSED_STATES for s in pr_states):
-                continue
+            if pr_ids:
+                if platform is None:
+                    platform = make_platform(config)
+                try:
+                    pr_states = [platform.get_pr_state(repo["name"], i) for i in sorted(pr_ids)]
+                except Exception as e:
+                    kept[path] = f"PR state lookup failed: {str(e)[:200]}"
+                    continue
+                if not all(s in CLOSED_STATES for s in pr_states):
+                    continue
             if dry_run:
                 reason = git_util.worktree_loss(path)
             else:
                 reason = git_util.release_worktree(
-                    repo["path"], path, still_idle=lambda p=path: pr_worktree_gc._idle(p, cutoff))
+                    repo["path"], path, still_idle=lambda p=path: _idle(p, cutoff))
             if reason:
                 kept[path] = reason
             else:
