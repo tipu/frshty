@@ -18,6 +18,7 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
             if features.get("auto_review"):
                 jobs.append({"instance_key": instance_key, "task": "poll_reviewer"})
             jobs.append({"instance_key": instance_key, "task": "poll_peer_reviews"})
+            jobs.append({"instance_key": instance_key, "task": "review_worktree_gc"})
         if features.get("pr_autofix"):
             jobs.append({"instance_key": instance_key, "task": "poll_pr_autofix"})
         if features.get("review_prs") or features.get("pr_autofix"):
