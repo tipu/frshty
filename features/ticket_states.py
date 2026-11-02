@@ -27,6 +27,7 @@ import core.state as state
 from core.ticket_status import TicketStatus, approval_edge, epic_edge, tests_failed_edge
 from pm import runner as pm_runner
 
+import features.pr_steward as pr_steward
 import features.tickets as _t
 
 
@@ -522,6 +523,14 @@ def _handle_in_review_ticket(
                 links={"detail": f"{base_url}/tickets/{key}"},
                 meta={"ticket": key, "scope_review": ts.get("scope_review") or {}})
         ts = _t._merge(config, ticket, ts, base_url)
+    if ts["status"] == "in_review":
+        try:
+            pr_steward.observe(config, ticket, ts, base_url, instance_key, pr_info_map)
+        except Exception as e:
+            log.emit("ticket_pr_steward_failed",
+                f"{_t._label(key, ts)}: the shadow steward fingerprint failed: {type(e).__name__}: {e}",
+                links={"detail": f"{base_url}/tickets/{key}"},
+                meta={"ticket": key, "reason": "observe_error", "error": type(e).__name__})
     return ts, False
 
 

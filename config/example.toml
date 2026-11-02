@@ -87,6 +87,12 @@ auto_merge = false                # governs both halves of frshty. the ticket pi
 #                                 # still holds the merge.
 # merge_strategy = "squash"       # squash, merge, rebase
 # merge_flags = ["--admin"]       # extra flags for gh pr merge
+# steward = "off"                 # "shadow" fingerprints each in_review PR (head commit, comment ids,
+#                                 # check states, base branch) and, when the fingerprint changes, runs
+#                                 # one read-only agent that decides each comment, each red check and
+#                                 # merge readiness. the decisions go to the event feed as
+#                                 # ticket_pr_steward_shadow next to the current code's decisions.
+#                                 # shadow mode changes no PR, comment, check or merge.
 
 # [commits]
 # key_first = false               # true starts every commit message frshty writes with the
