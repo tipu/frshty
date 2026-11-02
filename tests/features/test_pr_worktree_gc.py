@@ -47,6 +47,14 @@ def _project(tmp_path):
 
 def _age(path, age=OLD):
     git_dir, _ = git_util.git_dirs(path)
+    log = Path(git_dir, "logs", "HEAD")
+    if log.exists():
+        lines = []
+        for line in log.read_text().splitlines():
+            head, _, message = line.partition("\t")
+            fields = head.rsplit(" ", 2)
+            lines.append(f"{fields[0]} {int(age)} {fields[2]}\t{message}")
+        log.write_text("".join(ln + "\n" for ln in lines))
     for name in ("index", "HEAD", os.path.join("logs", "HEAD")):
         p = os.path.join(git_dir, name)
         if os.path.exists(p):
@@ -291,3 +299,49 @@ def test_github_reports_an_open_pr_before_the_closed_ones(monkeypatch):
     assert gh.branch_pr_state("app", "feat/x") == "NONE"
     monkeypatch.setattr(gh, "_run_gh", lambda args: subprocess.CompletedProcess(args, 1, "", "boom"))
     assert gh.branch_pr_state("app", "feat/x") is None
+
+
+def _refresh(repo, path):
+    _git(repo, "commit", "--allow-empty", "-m", "base moved")
+    _git(repo, "push", "origin", "main")
+    _git(path, "fetch", "origin")
+    _git(path, "-c", "user.email=t@t", "-c", "user.name=t", "merge", "origin/main", "--no-edit")
+    _git(path, "push", "origin", "HEAD:refs/heads/done")
+    _git(path, "reset", "--hard", "origin/done")
+
+
+def test_the_own_prs_refresh_does_not_count_as_use(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    _refresh(repo, done)
+
+    result = pr_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [str(done)], "kept": {}}
+    assert not done.exists()
+
+
+def test_a_commit_after_the_refresh_counts_as_use(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    _refresh(repo, done)
+    _git(done, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty",
+         "-m", "work")
+    _git(done, "push", "origin", "HEAD:refs/heads/done")
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=_Platform({"done": "OPEN"}))
+
+    assert result == {"removed": [], "kept": {}}
+    assert done.is_dir()
+
+
+def test_a_job_that_marks_the_worktree_used_keeps_it(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    _refresh(repo, done)
+    pr_worktree_gc.mark_used(done)
+
+    result = pr_worktree_gc.sweep(config, force=True, platform=_Platform({"done": "OPEN"}))
+
+    assert result == {"removed": [], "kept": {}}
+    assert done.is_dir()

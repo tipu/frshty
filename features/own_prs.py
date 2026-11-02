@@ -17,6 +17,7 @@ from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject,
 from core.config import base_branch_for, get_repos
 from features.pr_ci import FILE_TOOLS_KEEP_GREEN_RULE, ci_summary
 from features.platforms import make_platform
+from features.pr_worktree_gc import mark_used
 
 RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
@@ -703,6 +704,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
                 return False, "Could not create worktree"
+            mark_used(worktree)
 
             context = (
                 f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
@@ -835,6 +837,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             worktree = _ensure_worktree(config, pr)
             if not worktree:
                 return _fail_all(pending_ids, "Could not create worktree")
+            mark_used(worktree)
 
             comment_list = "\n\n".join(
                 f"[{i + 1}] File: {c.get('path', 'unknown')}\nLine: {c.get('line', 'unknown')}\nReview comment: {c['body']}"
@@ -975,6 +978,7 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None):
         meta = {"repo": pr["repo"], "pr_id": pr["id"],
                 "failed_checks": [c["name"] for c in failing]}
 
+        mark_used(worktree)
         outcome = triage_and_fix_pr(platform, pr["repo"], pr["id"], label=pr_ref,
                                       worktree=worktree,
                                       attempts=attempts,
