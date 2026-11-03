@@ -1100,7 +1100,8 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_use
             seen["ci_fix_sha"] = head
             seen.pop("ci_fix_at", None)
 
-        if kind == "capped":
+        if kind == "capped" or (ticket_key and attempts >= MAX_CI_FIX_ATTEMPTS
+                                and kind in TICKET_CI_SPENT):
             if not seen.get("ci_cap_emitted"):
                 log.emit("pr_checks_failed",
                          f"CI failed on {pr_ref} after {attempts} fix attempts: {', '.join(failed_names)}",
