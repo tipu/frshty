@@ -346,8 +346,17 @@ MUTATIONS = [
         "target": "tests/features/test_ticket_pr.py::TestReconcileCommentsNow"
                   "::test_a_comment_the_engine_has_not_seen_is_owed",
         "path": "features/ticket_pr.py",
-        "old": '                if row is None or row["state"] in comments.OWED_STATES:',
-        "new": '                if row is not None and row["state"] in comments.OWED_STATES:',
+        "old": '                if str(c["id"]) not in settled:',
+        "new": '                if False:',
+    },
+    {
+        "label": "merge_trusts_a_false_tombstone",
+        "gate": "a deleted row for a comment the platform still reports holds the merge",
+        "target": "tests/features/test_ticket_pr.py::TestReconcileCommentsNow"
+                  "::test_a_deleted_row_the_platform_still_reports_is_owed",
+        "path": "features/ticket_pr.py",
+        "old": '                instance_key, "pr", pr_key, {str(c["id"]) for c in fetched})',
+        "new": '                instance_key, "pr", pr_key, set())',
     },
     {
         "label": "own_pr_comment_fix_sweeps_the_worktree",
