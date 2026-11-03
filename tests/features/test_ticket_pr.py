@@ -299,3 +299,11 @@ def test_the_same_branch_in_two_repositories_gets_two_worktrees(tmp_path):
     web = own_prs._worktree_path(config, {"repo": "web", "branch": "PROJ-1-x"})
     assert api != web
     assert api.name == web.name == "PROJ-1-x"
+
+
+def test_a_ticket_fixer_that_fails_at_the_cap_parks_the_pr(tmp_path):
+    seen = {"ci_fix_attempts": 2}
+    TestTicketCiBudget()._ci(tmp_path, seen, {"result": "haiku_empty", "attempts": 2,
+                                              "failed_names": ["lint"]})
+    assert seen["ci_cap_emitted"] is True
+    assert seen["ci_fix_attempts"] == 2
