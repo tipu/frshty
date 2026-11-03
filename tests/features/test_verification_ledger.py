@@ -5,9 +5,9 @@ staled where the pipeline already pushes a new head or moves the base. The
 ledger is shadow: these tests hold it to recording what happened, and to
 leaving every decision exactly where it was.
 """
-import subprocess
 from unittest.mock import MagicMock, patch
 
+import core.comments as comments
 import core.db as db
 import core.freshness as freshness
 import core.state as state
@@ -129,10 +129,7 @@ class TestTheInReviewPollWritesTheClaims:
         platform.monitor_ci.return_value = ci_result
         info = {("repo", 1): {"head_sha": "sha-1"}}
         with patch("features.tickets._scope_review_state", return_value="disabled"), \
-             patch("features.tickets._resolve_conflicts_pending", return_value=False), \
              patch("features.tickets._build_pr_info_map", return_value=info), \
-             patch("features.tickets._has_conflicting_pr", return_value=False), \
-             patch("features.tickets._pr_base_moved", return_value=False), \
              patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets._merge"), \
              patch("features.tickets._check_in_review",
@@ -165,141 +162,26 @@ class TestTheInReviewPollWritesTheClaims:
     def test_the_comment_claim_records_the_watermark_that_was_triaged(
             self, fake_config):
         inst = _inst()
-        self._handle(fake_config, self._green(), inst, self._green(ci_passed=True),
-                     checked=lambda c, t, s, b, **kw: {**s, "last_comment_ids": {"repo/1": 42}})
-        assert '"repo/1": 42' in _claim(inst, "comments")["established_against"]
+        comments.mark_comment_seen(inst, "pr", "repo/1", "42", "2026-01-01T00:00:00Z")
+        self._handle(fake_config, self._green(), inst, self._green(ci_passed=True))
+        assert (_claim(inst, "comments")["established_against"]
+                == freshness.watermark(self._green(), inst))
 
     def test_a_moved_watermark_re_establishes_the_comment_claim(self, fake_config):
         inst = _inst()
-        for last in (42, 77):
-            self._handle(
-                fake_config, self._green(), inst, self._green(ci_passed=True),
-                checked=lambda c, t, s, b, _l=last, **kw: {**s, "last_comment_ids": {"repo/1": _l}})
-        assert '"repo/1": 77' in _claim(inst, "comments")["established_against"]
+        seen = []
+        for cid in ("42", "77"):
+            comments.mark_comment_seen(inst, "pr", "repo/1", cid, "2026-01-01T00:00:00Z")
+            self._handle(fake_config, self._green(), inst, self._green(ci_passed=True))
+            seen.append(_claim(inst, "comments")["established_against"])
+        assert seen[0] != seen[1]
+        assert seen[1] == freshness.watermark(self._green(), inst)
 
     def test_the_lever_off_writes_no_row(self, fake_config):
         inst = _inst()
         fake_config["freshness"] = {"enabled": False}
         self._handle(fake_config, self._green(), inst, self._green(ci_passed=True))
         assert _rows(inst) == []
-
-
-class TestTheBaseSyncStalesTheProof:
-    def _run(self, fake_config, inst, result):
-        fake_config["pr"]["auto_update_branch"] = True
-        ts = make_ticket_state(status="in_review", slug=SLUG, branch=SLUG,
-                               prs=[{"repo": "repo", "id": 1, "branch": SLUG,
-                                     "url": "u"}])
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path",
-                   return_value=MagicMock(is_dir=lambda: True)), \
-             patch("features.tickets.branch_sync.sync_branch_with_base",
-                   return_value={"result": result, "attempts": 0}), \
-             patch("features.tickets.log"), \
-             patch("core.freshness.state.active_instance_key", return_value=inst):
-            return tickets._sync_pr_base(fake_config, make_ticket(key=KEY), ts,
-                                         "http://base")
-
-    def test_a_base_merge_stales_the_proof_and_the_ci_verdict(self, fake_config):
-        inst = _inst()
-        freshness.record(KEY, "proof", "r:abc", instance_key=inst)
-        freshness.record(KEY, "ci", "repo/1@sha", instance_key=inst)
-        self._run(fake_config, inst, "synced")
-        assert _claim(inst, "proof")["invalidated_by"] == "ticket_base_synced"
-        assert _claim(inst, "ci")["invalidated_by"] == "ticket_base_synced"
-
-    def test_a_base_sync_that_did_not_merge_leaves_the_proof_standing(
-            self, fake_config):
-        inst = _inst()
-        freshness.record(KEY, "proof", "r:abc", instance_key=inst)
-        self._run(fake_config, inst, "dirty_worktree")
-        assert _claim(inst, "proof")["invalidated_at"] is None
-
-
-class TestTheCommentFixStalesTheProof:
-    def _init_git_pair(self, tmp_path, branch):
-        origin = tmp_path / "origin.git"
-        wt = tmp_path / "wt"
-        subprocess.run(["git", "init", "--bare", str(origin)], check=True,
-                       capture_output=True)
-        subprocess.run(["git", "clone", str(origin), str(wt)], check=True,
-                       capture_output=True)
-        for k, v in (("user.email", "t@example.com"), ("user.name", "t"),
-                     ("commit.gpgsign", "false")):
-            subprocess.run(["git", "config", k, v], cwd=str(wt), check=True,
-                           capture_output=True)
-        (wt / "app.py").write_text("original\n")
-        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True,
-                       capture_output=True)
-        subprocess.run(["git", "commit", "-m", "init"], cwd=str(wt), check=True,
-                       capture_output=True)
-        subprocess.run(["git", "checkout", "-b", branch], cwd=str(wt), check=True,
-                       capture_output=True)
-        subprocess.run(["git", "push", "-u", "origin", branch], cwd=str(wt),
-                       check=True, capture_output=True)
-        return wt
-
-    def _run(self, fake_config, tmp_path, inst, fix):
-        slug = "PROJ-1-do-the-thing"
-        wt = self._init_git_pair(tmp_path, slug)
-        ts = make_ticket_state(
-            status="in_review", slug=slug, branch=slug,
-            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}])
-        comment = {"id": 100, "body": "Remove the duplicate definition",
-                   "author_id": "reviewer1", "author_name": "Reviewer",
-                   "path": "app.py", "line": 1, "parent_id": None,
-                   "created_on": "2026-08-20T23:00:00Z",
-                   "created_at": "2026-08-20T23:00:00Z",
-                   "updated_at": "2026-08-20T23:00:00Z"}
-        platform = MagicMock()
-        platform.get_pr_state.return_value = "OPEN"
-        platform.get_pr_comments.return_value = [comment]
-        platform.push_branch.return_value = {"ok": True}
-        bb_config = {
-            **fake_config,
-            "job": {**fake_config["job"], "platform": "bitbucket"},
-            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
-        }
-
-        def claude(prompt, cwd=None, **kwargs):
-            if fix:
-                (wt / "app.py").write_text("fixed\n")
-                subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True,
-                               capture_output=True)
-                subprocess.run(["git", "commit", "-m", "remove duplicate"],
-                               cwd=str(wt), check=True, capture_output=True)
-            return "done"
-
-        with patch("features.tickets.make_platform", return_value=platform), \
-             patch("features.tickets.get_repos",
-                   return_value=[{"name": "repo", "path": wt.parent}]), \
-             patch("features.tickets.ticket_worktree_path", return_value=wt), \
-             patch("features.tickets.run_balanced",
-                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
-             patch("features.tickets.run_claude_code", side_effect=claude), \
-             patch("core.freshness.state.active_instance_key", return_value=inst):
-            tickets._check_in_review(bb_config, make_ticket(key=KEY), ts,
-                                     "http://base")
-        return platform
-
-    def test_a_pushed_comment_fix_stales_the_proof_and_the_ci_verdict(
-            self, fresh_db, fake_config, tmp_state, tmp_path):
-        inst = _inst()
-        freshness.record(KEY, "proof", "r:abc", instance_key=inst)
-        freshness.record(KEY, "ci", "repo/99@sha", instance_key=inst)
-        platform = self._run(fake_config, tmp_path, inst, fix=True)
-        assert platform.push_branch.call_count == 1
-        assert _claim(inst, "proof")["invalidated_by"] == "ticket_pr_comment_fixed"
-        assert _claim(inst, "ci")["invalidated_by"] == "ticket_pr_comment_fixed"
-
-    def test_a_comment_that_needed_no_commit_leaves_the_proof_standing(
-            self, fresh_db, fake_config, tmp_state, tmp_path):
-        inst = _inst()
-        freshness.record(KEY, "proof", "r:abc", instance_key=inst)
-        platform = self._run(fake_config, tmp_path, inst, fix=False)
-        assert platform.push_branch.call_count == 0
-        assert _claim(inst, "proof")["invalidated_at"] is None
 
 
 class TestTheSmokeClaim:

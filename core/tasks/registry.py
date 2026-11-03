@@ -131,8 +131,7 @@ def _apply_status(ctx: TaskContext, target: str) -> TaskResult | None:
 # `blocked` would sever the re-enqueue loop and strand it. Leave them in place
 # so the dispatcher retries on the next cycle.
 _RETRY_LOOP_TASKS = frozenset({
-    "fix_review_findings", "run_tests_and_fix", "fix_ci_failures",
-    "resolve_conflicts", "scope_review", "fix_scope_findings",
+    "fix_review_findings", "run_tests_and_fix", "scope_review", "fix_scope_findings",
 })
 
 _BEST_EFFORT_TASKS = frozenset({"generate_flow_doc"})

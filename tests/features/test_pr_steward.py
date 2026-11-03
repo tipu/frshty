@@ -3,7 +3,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import core.comments as comments
 import core.db as db
+import core.state as state
 import features.pr_steward as steward
 import features.ticket_states as ticket_states
 from core.config import load_config
@@ -190,10 +192,7 @@ class TestTheInReviewHandler:
         platform = MagicMock()
         platform.monitor_ci.return_value = ts
         with patch("features.tickets._scope_review_state", return_value="disabled"), \
-             patch("features.tickets._resolve_conflicts_pending", return_value=False), \
              patch("features.tickets._build_pr_info_map", return_value={}), \
-             patch("features.tickets._has_conflicting_pr", return_value=False), \
-             patch("features.tickets._pr_base_moved", return_value=False), \
              patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets._merge", side_effect=lambda c, t, ts, b: ts) as merge, \
              patch("features.tickets._check_in_review", side_effect=_reconciled), \
@@ -251,19 +250,20 @@ class TestRunShadow:
             result = steward.run_shadow(config, self._payload())
         return result, log, agent, platform
 
-    def _ts(self, fake_config, **extra):
+    @pytest.fixture(autouse=True)
+    def _state(self, tmp_state):
+        yield
+
+    def _ts(self, fake_config, ci_unrelated_checks=None, **extra):
         ts = make_ticket_state(status="in_review", prs=[dict(PR)], **extra)
-        path = steward._t._pr_comments_path(fake_config, ts["slug"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps([
-            {"id": 100, "comment_kind": "review", "pr_repo": "api", "pr_id": 7,
-             "body": "Rename this to total", "status": "addressed"},
-        ]))
+        state.save("own_prs", {"api/7": {"comments_read_ok": True,
+                                         "ci_unrelated_checks": (ci_unrelated_checks or {}).get("api/7", [])}})
+        comments.mark_comment_seen("test", "pr", "api/7", "100", "2026-01-01T00:00:00Z")
+        comments.record_comment_fix("test", "pr", "api/7", "100")
         return ts
 
     def test_it_logs_the_steward_beside_the_current_code(self, fake_config):
-        ts = self._ts(fake_config, ci_unrelated_checks={"api/7": ["e2e"]},
-                      _comments_read_ok=True, _comments_owed=0)
+        ts = self._ts(fake_config, ci_unrelated_checks={"api/7": ["e2e"]})
         result, log, _, _ = self._run(_shadow(fake_config), ts, _decisions())
         assert result == ("ok", "")
         event, = [c for c in log.emit.call_args_list if c[0][0] == "ticket_pr_steward_shadow"]
@@ -349,29 +349,31 @@ class TestRunShadow:
 
 
 class TestCurrentMergeReadiness:
+    @pytest.fixture(autouse=True)
+    def _read(self, tmp_state):
+        state.save("own_prs", {"api/7": {"comments_read_ok": True}})
+        yield
     def test_green_ci_and_nothing_owed_is_ready_under_auto_merge(self, fake_config):
         fake_config["pr"]["auto_merge"] = True
-        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)],
-                               _comments_read_ok=True, _comments_owed=0)
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)])
         assert steward._current_merge(fake_config, ts)["ready_to_merge"] is True
 
     def test_without_a_merge_rule_the_code_never_merges(self, fake_config):
-        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)],
-                               _comments_read_ok=True, _comments_owed=0)
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)])
         current = steward._current_merge(fake_config, ts)
         assert current["gates_clear"] is True
         assert current["ready_to_merge"] is False
 
     def test_a_failed_scope_review_holds_auto_merge(self, fake_config):
         fake_config["pr"]["auto_merge"] = True
-        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)],
-                               _comments_read_ok=True, _comments_owed=0)
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)])
         with patch("features.tickets._scope_review_state", return_value="fail"):
             assert steward._current_merge(fake_config, ts)["ready_to_merge"] is False
 
     def test_an_owed_comment_is_not_ready(self, fake_config):
-        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)],
-                               _comments_read_ok=True, _comments_owed=1)
+        ts = make_ticket_state(status="in_review", ci_passed=True, prs=[dict(PR)])
+        comments.mark_comment_processing("test", "pr", "api/7", "5", "2026-01-01T00:00:00Z")
+        comments.mark_comment_manual("test", "pr", "api/7", "5", "needs a reply")
         assert steward._current_merge(fake_config, ts)["ready_to_merge"] is False
 
 

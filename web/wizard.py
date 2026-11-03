@@ -9,8 +9,9 @@ from fastapi.responses import JSONResponse
 import core.db as db
 import core.llm as llm
 import core.log as log
+import core.state as state
+import features.ticket_pr as ticket_pr
 import manager.staleness as staleness
-from features.tickets import _load_pr_comments
 from web.state import _config
 
 
@@ -323,10 +324,10 @@ def api_wizard_draft_reply(body: dict):
     comment = None
     ticket_key = None
     for r in rows:
-        slug = r["slug"]
-        if not slug:
+        ts = state.load_ticket(r["ticket_key"])
+        if not ts:
             continue
-        comments = _load_pr_comments(_config, slug)
+        comments = ticket_pr.comment_rows(_config, ts)
         for c in comments:
             if (c.get("pr_repo") == repo
                     and c.get("pr_id") == pr_id

@@ -8,6 +8,7 @@ import pytest
 import core.db as db
 import core.state as state
 import core.log as log
+from tests.conftest import seed_reply_owed
 
 
 def _agent_started(session_id):
@@ -53,8 +54,8 @@ def test_launch_creates_session_and_resumes(client):
         "status": "in_review", "slug": slug, "summary": "Clinician review",
         "prs": [{"repo": "analytics_dev", "id": 551, "url": "http://x/551", "approvers": ["dou"]}],
     })
-    # pr_comments.json with a needs_reply comment
-    (wt / "pr_comments.json").write_text('[{"id":1,"pr_repo":"analytics_dev","pr_id":551,"body":"Sanitize?","path":"a.py","line":5,"diff_hunk":"@@","status":"needs_reply","suggested_reply":"done"}]')
+    seed_reply_owed("test", "analytics_dev", 551, 1, "Sanitize?", path="a.py", line=5,
+                    diff_hunk="@@", suggested_reply="done")
 
     calls = []
     def fake_launch(key, cwd, sid, ctx, first_run, config=None):
@@ -102,9 +103,8 @@ def test_launch_reseeds_when_the_agent_never_started(client):
         "status": "in_review", "slug": slug, "summary": "Never started",
         "prs": [{"repo": "analytics_dev", "id": 552, "url": "http://x/552", "approvers": ["dou"]}],
     })
-    (wt / "pr_comments.json").write_text(
-        '[{"id":2,"pr_repo":"analytics_dev","pr_id":552,"body":"Why?","path":"a.py","line":5,'
-        '"diff_hunk":"@@","status":"needs_reply","suggested_reply":"because"}]')
+    seed_reply_owed("test", "analytics_dev", 552, 2, "Why?", path="a.py", line=5,
+                    diff_hunk="@@", suggested_reply="because")
 
     calls = []
 

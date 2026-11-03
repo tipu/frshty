@@ -13,15 +13,16 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
         features = reg.config.get("features", {})
         if features.get("tickets"):
             jobs.append({"instance_key": instance_key, "task": "scan_tickets"})
-        if features.get("review_prs"):
+        if features.get("review_prs") or features.get("tickets"):
             jobs.append({"instance_key": instance_key, "task": "poll_own_prs"})
+        if features.get("review_prs"):
             if features.get("auto_review"):
                 jobs.append({"instance_key": instance_key, "task": "poll_reviewer"})
             jobs.append({"instance_key": instance_key, "task": "poll_peer_reviews"})
             jobs.append({"instance_key": instance_key, "task": "review_worktree_gc"})
         if features.get("pr_autofix"):
             jobs.append({"instance_key": instance_key, "task": "poll_pr_autofix"})
-        if features.get("review_prs") or features.get("pr_autofix"):
+        if features.get("review_prs") or features.get("pr_autofix") or features.get("tickets"):
             jobs.append({"instance_key": instance_key, "task": "pr_worktree_gc"})
         if features.get("billing"):
             jobs.append({"instance_key": instance_key, "task": "poll_billing_invoices"})

@@ -197,8 +197,8 @@ MUTATIONS = [
         "target": "tests/core/test_hard_block.py::TestHardBlockEscapesTheRetryExemption"
                   "::test_a_failed_scope_review_leaves_the_ticket_in_proving",
         "path": "core/tasks/registry.py",
-        "old": '    "resolve_conflicts", "scope_review", "fix_scope_findings",',
-        "new": '    "resolve_conflicts",',
+        "old": '    "fix_review_findings", "run_tests_and_fix", "scope_review", "fix_scope_findings",',
+        "new": '    "fix_review_findings", "run_tests_and_fix",',
     },
     {
         "label": "scope_gate_runs_after_the_proof",
@@ -314,53 +314,6 @@ MUTATIONS = [
         "new": "    sources = [n for n in listed.stdout.splitlines() if n.strip()]",
     },
     {
-        "label": "comment_cursor_advances_past_a_failed_push",
-        "gate": "the review-comment cursor advances only when the fix push lands",
-        "target": "tests/features/test_tickets.py::TestCheckInReviewPushFailure"
-                  "::test_cursor_holds_when_push_is_rejected",
-        "path": "features/tickets.py",
-        "old": '                        entry["status"] = "fix_unpushed"',
-        "new": '                        entry["status"] = "addressed"',
-    },
-    {
-        "label": "no_change_resolves_thread",
-        "gate": "a run that produced no change does not resolve the thread",
-        "target": "tests/features/test_tickets.py::TestCheckInReviewSelfCommittedFix"
-                  "::test_clean_no_change_run_does_not_resolve",
-        "path": "features/tickets.py",
-        "old": "                commit_rc = None\n"
-               "                commit_outcome = None",
-        "new": "                if fix_result and not staged:\n"
-               "                    to_resolve.append(comment[\"id\"])\n"
-               '                    entry["status"] = "addressed"\n'
-               "                commit_rc = None\n"
-               "                commit_outcome = None",
-    },
-    {
-        "label": "failed_read_reads_as_empty",
-        "gate": "a comment read that failed skips the pull request instead of reading as empty",
-        "target": "tests/features/test_ticket_comment_fail_closed.py"
-                  "::TestAFailedReadIsNotAnEmptyPr"
-                  "::test_the_pull_request_is_skipped_and_nothing_advances",
-        "path": "features/tickets.py",
-        "old": "        fetched = platform.get_pr_comments(pr[\"repo\"], pr[\"id\"])\n"
-               "        if fetched is None:",
-        "new": "        fetched = platform.get_pr_comments(pr[\"repo\"], pr[\"id\"]) or []\n"
-               "        if fetched is None:",
-    },
-    {
-        "label": "resolve_failure_ignored",
-        "gate": "a thread that would not resolve leaves its comment owed",
-        "target": "tests/features/test_ticket_comment_fail_closed.py"
-                  "::TestAFailedResolveLeavesTheCommentOwed"
-                  "::test_the_entry_is_fix_failed_and_the_cursor_holds",
-        "path": "features/tickets.py",
-        "old": '            if isinstance(resolution, dict) and resolution.get("status") != "resolved":\n'
-               "                resolved_entry = entry_by_id.get(cid)",
-        "new": "            if False:\n"
-               "                resolved_entry = entry_by_id.get(cid)",
-    },
-    {
         "label": "manual_comment_marked_terminal",
         "gate": "a comment handed to a human stays owed instead of being closed",
         "target": "tests/features/test_manual_comment_state.py"
@@ -380,12 +333,21 @@ MUTATIONS = [
     },
     {
         "label": "merge_before_reconcile",
-        "gate": "a ticket does not merge before its comments are reconciled",
-        "target": "tests/features/test_merge_comment_gate.py::TestMergeWaitsForComments"
-                  "::test_a_comment_posted_in_the_same_poll_blocks_the_merge",
-        "path": "features/tickets.py",
-        "old": '    hold = "" if force else merge_hold_reason(ts)',
-        "new": '    hold = ""',
+        "gate": "a ticket does not merge while comment_state owes a comment an answer",
+        "target": "tests/features/test_ticket_pr.py::TestMergeHoldReason"
+                  "::test_a_comment_that_waits_for_a_reply_holds",
+        "path": "features/ticket_pr.py",
+        "old": "        owed += len(_owed_rows(instance_key, pr_key))",
+        "new": "        owed += 0",
+    },
+    {
+        "label": "merge_ignores_an_unseen_comment",
+        "gate": "a comment the own-PR engine has not read yet holds the merge",
+        "target": "tests/features/test_ticket_pr.py::TestReconcileCommentsNow"
+                  "::test_a_comment_the_engine_has_not_seen_is_owed",
+        "path": "features/ticket_pr.py",
+        "old": '                if row is None or row["state"] in comments.OWED_STATES:',
+        "new": '                if row is not None and row["state"] in comments.OWED_STATES:',
     },
     {
         "label": "own_pr_comment_fix_sweeps_the_worktree",

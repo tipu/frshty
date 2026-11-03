@@ -1,6 +1,6 @@
 import subprocess
-from datetime import datetime, timezone
-from unittest.mock import patch, MagicMock
+from datetime import datetime
+from unittest.mock import patch
 
 import features.tickets as tickets
 
@@ -17,107 +17,6 @@ def _ts(**over):
     return ts
 
 
-class TestPrBaseMoved:
-    def test_true_when_never_synced(self):
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), _ts()) is True
-
-    def test_false_when_synced_to_same_sha(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_synced": True, "base_sync_sha": "sha1"}})
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), ts) is False
-
-    def test_true_when_base_advanced(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_synced": True, "base_sync_sha": "old"}})
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="new"):
-            assert tickets._pr_base_moved(_cfg(), ts) is True
-
-    def test_false_when_capped_on_current_sha(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "sha1", "base_sync_attempts": 2,
-                                         "base_sync_head": "sha1",
-                                         "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}})
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), ts) is False
-
-    def test_false_when_capped_and_only_the_base_advanced(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old", "base_sync_attempts": 2,
-                                         "base_sync_head": "h1", "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}})
-        heads = {"main": "new", "refs/heads/t-1-branch": "h1"}
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: heads[ref]):
-            assert tickets._pr_base_moved(_cfg(), ts) is False
-
-    def test_true_when_capped_and_the_pr_branch_head_moved(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old", "base_sync_attempts": 2,
-                                         "base_sync_head": "h1"}})
-        heads = {"main": "new", "refs/heads/t-1-branch": "h2"}
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: heads[ref]):
-            assert tickets._pr_base_moved(_cfg(), ts) is True
-
-    def test_true_when_under_attempt_cap(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "sha1", "base_sync_attempts": 1}})
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), ts) is True
-
-
-    def test_false_while_parked_although_base_advanced(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old",
-                                         "base_sync_parked": {"head": "h1", "base": "main"}}})
-        heads = {"main": "new", "refs/heads/t-1-branch": "h1"}
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: heads[ref]):
-            assert tickets._pr_base_moved(_cfg(), ts) is False
-
-
-class TestSyncPrBase:
-    def test_disabled_flag_noop(self):
-        with patch("features.tickets.branch_sync.sync_branch_with_base") as mock_sync:
-            tickets._sync_pr_base(_cfg(enabled=False), {"key": "T-1"}, _ts(), "http://base")
-        mock_sync.assert_not_called()
-
-    def test_synced_clears_ci_and_logs(self):
-        ts = _ts(ci_passed=True, checks_started_at="2026-01-01T00:00:00Z")
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path", return_value=MagicMock()), \
-             patch("features.tickets.branch_sync.sync_branch_with_base",
-                   return_value={"result": "synced", "base": "main"}), \
-             patch("features.tickets.log.emit") as mock_emit:
-            tickets._sync_pr_base(_cfg(), {"key": "T-1", "summary": "x"}, ts, "http://base")
-        assert "ci_passed" not in ts and "checks_started_at" not in ts
-        assert any(c.args[0] == "ticket_base_synced" for c in mock_emit.call_args_list)
-
-    def test_pushes_pr_branch_when_pr_has_own_branch(self):
-        ts = _ts(prs=[{"repo": "myrepo", "id": 7, "url": "http://pr/7",
-                       "branch": "t-1-other-branch"},
-                      {"repo": "repo2", "id": 8, "url": "http://pr/8"}])
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path", return_value=MagicMock()), \
-             patch("features.tickets.branch_sync.sync_branch_with_base",
-                   return_value={"result": "skip"}) as mock_sync, \
-             patch("features.tickets.log.emit"):
-            tickets._sync_pr_base(_cfg(), {"key": "T-1", "summary": "x"}, ts, "http://base")
-        branches = [c.args[3] for c in mock_sync.call_args_list]
-        assert branches == ["t-1-other-branch", "t-1-branch"]
-
-    def test_capped_merge_failure_logs(self):
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path", return_value=MagicMock()), \
-             patch("features.tickets.branch_sync.sync_branch_with_base",
-                   return_value={"result": "merge_failed", "error": "x", "attempts": 2, "capped": True}), \
-             patch("features.tickets.log.emit") as mock_emit:
-            tickets._sync_pr_base(_cfg(), {"key": "T-1", "summary": "x"}, _ts(), "http://base")
-        assert any(c.args[0] == "ticket_base_sync_failed" for c in mock_emit.call_args_list)
-
-
 def _dev_cfg():
     return {"pr": {"auto_update_branch": True},
             "workspace": {"base_branch": "main", "base_branches": {"myrepo": "development"}},
@@ -129,52 +28,6 @@ def _main_pr_ts(**over):
 
 
 class TestPrTargetBase:
-    def test_base_moved_reads_the_pr_base_not_the_configured_base(self):
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1") as mock_sha:
-            tickets._pr_base_moved(_dev_cfg(), _main_pr_ts())
-        assert mock_sha.call_args.args[1] == "main"
-
-    def test_base_moved_falls_back_to_the_configured_base(self):
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1") as mock_sha:
-            tickets._pr_base_moved(_dev_cfg(), _ts())
-        assert mock_sha.call_args.args[1] == "development"
-
-    def test_sync_merges_the_pr_base_not_the_configured_base(self):
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.sync_branch_with_base",
-                   return_value={"result": "synced", "base": "main"}) as mock_sync, \
-             patch("features.tickets.log.emit") as mock_emit:
-            tickets._sync_pr_base(_dev_cfg(), {"key": "T-1", "summary": "x"}, _main_pr_ts(), "http://base")
-        assert mock_sync.call_args.args[2] == "main"
-        synced = [c for c in mock_emit.call_args_list if c.args[0] == "ticket_base_synced"]
-        assert synced and synced[0].kwargs["meta"]["base"] == "main"
-
-    def test_sync_falls_back_to_the_configured_base(self):
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.sync_branch_with_base",
-                   return_value={"result": "skip"}) as mock_sync, \
-             patch("features.tickets.log.emit"):
-            tickets._sync_pr_base(_dev_cfg(), {"key": "T-1", "summary": "x"}, _ts(), "http://base")
-        assert mock_sync.call_args.args[2] == "development"
-
-    def test_conflict_resolution_merges_the_pr_base(self, tmp_path):
-        platform = MagicMock()
-        platform.sync_remote_branch.return_value = {"ok": True}
-        platform.merge_base.return_value = {"ok": True}
-        platform.push_branch.return_value = {"ok": True}
-        info = {("myrepo", 25): {"mergeable": "CONFLICTING"}}
-        with patch("features.tickets.make_platform", return_value=platform), \
-             patch("features.tickets.ticket_worktree_path", return_value=tmp_path), \
-             patch("features.tickets.subprocess.run"), \
-             patch("features.tickets.log.emit"):
-            tickets._resolve_conflicts(_dev_cfg(), {"key": "T-1", "summary": "x"},
-                                       _main_pr_ts(), "http://base", pr_info_map=info)
-        assert platform.merge_base.call_args.args[1] == "main"
-
     def test_missing_worktree_is_created_from_the_pr_base(self, tmp_path):
         ts = _main_pr_ts()
         with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
@@ -226,33 +79,3 @@ class TestEnsurePrWorktree:
         assert any(c.args[0] == "ticket_pr_worktree_failed" for c in mock_emit.call_args_list)
 
 
-class TestPrBaseMovedAfterDirtyBlock:
-    def _ts(self):
-        return _ts(base_sync={"myrepo/7": {
-            "base_sync_sha": "sha1", "base_sync_attempts": 2,
-            "last_base_error": "worktree has uncommitted changes (a.py); merge would overwrite them",
-            "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}})
-
-    def test_true_when_dirty_worktree_is_now_clean(self, tmp_path):
-        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path", return_value=tmp_path), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), self._ts()) is True
-
-    def test_false_while_worktree_stays_dirty(self, tmp_path):
-        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
-        (tmp_path / "a.py").write_text("x")
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path", return_value=tmp_path), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), self._ts()) is False
-
-    def test_true_when_borrowed_branch_worktree_is_now_clean(self, tmp_path):
-        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
-        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.ticket_worktree_path", return_value=tmp_path / "absent"), \
-             patch("features.tickets.git_util.worktree_holding_branch", return_value=tmp_path) as holder, \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
-            assert tickets._pr_base_moved(_cfg(), self._ts()) is True
-        assert holder.call_args.args[1] == "t-1-branch"

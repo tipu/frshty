@@ -291,7 +291,8 @@ class TestCheckComments:
         platform.get_pr_comments.return_value = [c1, c2]
         pr = make_pr()
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
-        seen = {"fix_deadline": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
+        seen = {"fix_deadline": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                "ledger_imported": True}
 
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
@@ -334,7 +335,8 @@ class TestCheckComments:
         platform.get_pr_comments.return_value = [c1]
         pr = make_pr()
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
-        seen = {"fix_deadline": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
+        seen = {"fix_deadline": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+                "ledger_imported": True}
 
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
@@ -1906,28 +1908,30 @@ class TestEnsureWorktree:
 
 
 class TestTicketOwnership:
-    def _config(self, tmp_path):
+    def _config(self, tmp_path, review_prs=True):
         return {"_state_dir": tmp_path, "_base_url": "http://base",
                 "job": {"key": "test", "platform": "github"},
+                "features": {"review_prs": review_prs},
                 "github": {"user": "me-gh"}, "workspace": {"repos": []}}
 
-    def _run_check(self, tmp_path, tickets, on_comments=None):
+    def _run_check(self, tmp_path, tickets, review_prs=True, ci_attempts=None):
         platform = MagicMock()
         platform.list_my_open_prs.return_value = [
             make_pr(repo="svc", id=171, updated_on=datetime.now(timezone.utc).isoformat())]
+        pr_state = {"svc/170": {"ticket_key": "LSC-51", "ci_fix_attempts": ci_attempts}} if ci_attempts else {}
 
         def load(module):
-            return tickets if module == "tickets" else {}
+            return tickets if module == "tickets" else pr_state
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs.state.load", side_effect=load), \
              patch("features.own_prs.state.save") as mock_save, \
              patch("features.own_prs._cache_pr_metadata"), \
-             patch("features.own_prs._check_comments", side_effect=on_comments) as mock_comments, \
+             patch("features.own_prs._check_comments") as mock_comments, \
              patch("features.own_prs._check_base_fresh") as mock_base, \
              patch("features.own_prs._check_ci") as mock_ci, \
              patch("features.own_prs._check_stale"):
-            own_prs.check(self._config(tmp_path))
+            own_prs.check(self._config(tmp_path, review_prs))
         return {"comments": mock_comments, "base": mock_base, "ci": mock_ci, "save": mock_save}
 
     def test_ticket_owned_pr_is_named(self):
@@ -1937,28 +1941,32 @@ class TestTicketOwnership:
             assert own_prs._ticket_owns({"repo": "svc", "id": 172}) == ""
             assert own_prs._ticket_owns({"repo": "other", "id": 171}) == ""
 
-    def test_pr_already_on_a_ticket_is_left_to_the_ticket_lane(self, tmp_path):
+    def test_a_ticket_pr_runs_every_step_with_the_ticket_flag(self, tmp_path):
         calls = self._run_check(tmp_path, {"LSC-51": {"prs": [{"repo": "svc", "id": 171}]}})
-        calls["comments"].assert_not_called()
-        calls["base"].assert_not_called()
-        calls["ci"].assert_not_called()
+        assert calls["comments"].call_args.kwargs["ticket_key"] == "LSC-51"
+        assert calls["base"].call_args.kwargs["ticket_key"] == "LSC-51"
+        calls["ci"].assert_called_once()
+        saved = calls["save"].call_args[0][1]
+        assert saved["svc/171"]["ticket_key"] == "LSC-51"
 
     def test_untracked_pr_runs_every_step(self, tmp_path):
         calls = self._run_check(tmp_path, {})
-        calls["comments"].assert_called_once()
+        assert calls["comments"].call_args.kwargs["ticket_key"] is None
         calls["base"].assert_called_once()
         calls["ci"].assert_called_once()
 
-    def test_adoption_during_the_poll_stops_the_base_and_ci_steps(self, tmp_path):
-        tickets: dict = {}
-
-        def adopt(*args, **kwargs):
-            tickets["LSC-51"] = {"prs": [{"repo": "svc", "id": 171}]}
-
-        calls = self._run_check(tmp_path, tickets, on_comments=adopt)
+    def test_without_review_prs_only_ticket_prs_are_driven(self, tmp_path):
+        calls = self._run_check(tmp_path, {}, review_prs=False)
+        calls["comments"].assert_not_called()
+        calls = self._run_check(tmp_path, {"LSC-51": {"prs": [{"repo": "svc", "id": 171}]}},
+                                review_prs=False)
         calls["comments"].assert_called_once()
-        calls["base"].assert_not_called()
-        calls["ci"].assert_not_called()
+
+    def test_the_ci_budget_is_shared_by_the_prs_of_one_ticket(self, tmp_path):
+        calls = self._run_check(tmp_path, {"LSC-51": {"prs": [{"repo": "svc", "id": 171},
+                                                              {"repo": "svc", "id": 170}]}},
+                                ci_attempts=1)
+        assert calls["ci"].call_args.kwargs["budget_used"] == 1
 
 
 class TestWorktreeLockIsShared:
@@ -2255,6 +2263,7 @@ class TestOneRemoteListingPerRepository:
     def _config(self, tmp_path):
         return {"_state_dir": tmp_path, "_base_url": "http://base",
                 "job": {"key": "test", "platform": "github"},
+                "features": {"review_prs": True},
                 "pr": {"auto_update_branch": True},
                 "workspace": {"repos": [], "base_branch": "main"}}
 
@@ -2302,7 +2311,8 @@ class TestInactivePrsSkipTheExpensiveWork:
         platform = MagicMock()
         platform.list_my_open_prs.return_value = prs
         config = {"_state_dir": tmp_path, "_base_url": "http://base",
-                  "job": {"key": "test", "platform": "github"}, "workspace": {"repos": []}}
+                  "job": {"key": "test", "platform": "github"},
+                  "features": {"review_prs": True}, "workspace": {"repos": []}}
         mocks = {}
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs.state.load", return_value={}), \

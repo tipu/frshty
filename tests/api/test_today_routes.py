@@ -9,6 +9,7 @@ import core.state as state
 import core.log as log
 import core.db as db
 from manager import watchdog
+from tests.conftest import seed_reply_owed
 
 
 @pytest.fixture()
@@ -209,7 +210,7 @@ class TestMergeEndpoint:
         def fake_merge(config, ticket, ts, base_url, force=False):
             return {**ts, "status": "merged", "merged_external_status": "Done"}
 
-        with patch("features.tickets.reconcile_comments_now", return_value=("", [])), \
+        with patch("features.ticket_pr.reconcile_comments_now", return_value=("", [])), \
              patch("features.tickets._merge", side_effect=fake_merge):
             resp = client.post("/api/tickets/T-3/merge")
         assert resp.status_code == 200
@@ -225,7 +226,7 @@ class TestMergeEndpoint:
                                    "prs": [{"repo": "r", "id": 1, "url": "u"}]})
         owed = ("2 comment(s) owed an answer", [{"snippet": "needs a guard"}])
 
-        with patch("features.tickets.reconcile_comments_now", return_value=owed), \
+        with patch("features.ticket_pr.reconcile_comments_now", return_value=owed), \
              patch("features.tickets._merge") as merge:
             resp = client.post("/api/tickets/T-4/merge")
         assert resp.status_code == 409
@@ -236,7 +237,7 @@ class TestMergeEndpoint:
         state.save_ticket("T-5", {"status": "in_review", "slug": "T-5-s",
                                    "prs": [{"repo": "r", "id": 1, "url": "u"}]})
 
-        with patch("features.tickets.reconcile_comments_now",
+        with patch("features.ticket_pr.reconcile_comments_now",
                    return_value=("comment read failed", [])), \
              patch("features.tickets._merge") as merge:
             resp = client.post("/api/tickets/T-5/merge")
@@ -252,7 +253,7 @@ class TestMergeEndpoint:
             return {**ts, "status": "merged", "merged_external_status": "Done"}
 
         owed = ("2 comment(s) owed an answer", [])
-        with patch("features.tickets.reconcile_comments_now", return_value=owed), \
+        with patch("features.ticket_pr.reconcile_comments_now", return_value=owed), \
              patch("features.tickets._merge", side_effect=fake_merge):
             resp = client.post("/api/tickets/T-6/merge", json={"force": True})
         assert resp.status_code == 200
@@ -268,18 +269,8 @@ class TestPrCommentBucketIncludesId:
                                    "summary": "fix the thing",
                                    "prs": [{"repo": "r", "id": 5,
                                             "url": "http://pr/5"}]})
-        slug_dir = tmp_path / "tickets" / "T-7-fix"
-        slug_dir.mkdir(parents=True, exist_ok=True)
-        (slug_dir / "pr_comments.json").write_text(json.dumps([{
-            "id": 100,
-            "status": "needs_reply",
-            "pr_repo": "r",
-            "pr_id": 5,
-            "path": "src/a.py",
-            "line": 12,
-            "body": "please rename",
-            "suggested_reply": "renamed",
-        }]))
+        seed_reply_owed("test", "r", 5, 100, "please rename", path="src/a.py", line=12,
+                        suggested_reply="renamed")
 
         resp = client.get("/api/today/loops")
         data = resp.json()
@@ -304,18 +295,8 @@ class TestPrCommentBucketExcludesStalePrs:
                                    "slug": "T-8-fix",
                                    "summary": "stale comments",
                                    "prs": []})
-        slug_dir = tmp_path / "tickets" / "T-8-fix"
-        slug_dir.mkdir(parents=True, exist_ok=True)
-        (slug_dir / "pr_comments.json").write_text(json.dumps([{
-            "id": 200,
-            "status": "needs_reply",
-            "pr_repo": "spa-dashboard",
-            "pr_id": 115,
-            "path": "src/x.tsx",
-            "line": None,
-            "body": "still needed?",
-            "suggested_reply": "no, removed",
-        }]))
+        seed_reply_owed("test", "spa-dashboard", 115, 200, "still needed?", path="src/x.tsx",
+                        suggested_reply="no, removed")
 
         resp = client.get("/api/today/loops")
         bucket = resp.json()["loops"]["pr_comments_needs_reply"]
@@ -326,16 +307,10 @@ class TestPrCommentBucketExcludesStalePrs:
         state.save_ticket("T-9", {"status": "in_review",
                                    "slug": "T-9-fix",
                                    "summary": "one live, one stale",
-                                   "prs": [{"repo": "r", "id": 5,
+                                   "prs": [{"repo": "r9", "id": 5,
                                             "url": "http://pr/5"}]})
-        slug_dir = tmp_path / "tickets" / "T-9-fix"
-        slug_dir.mkdir(parents=True, exist_ok=True)
-        (slug_dir / "pr_comments.json").write_text(json.dumps([
-            {"id": 300, "status": "needs_reply", "pr_repo": "r", "pr_id": 5,
-             "path": "src/a.py", "line": 1, "body": "live", "suggested_reply": ""},
-            {"id": 301, "status": "needs_reply", "pr_repo": "r", "pr_id": 99,
-             "path": "src/b.py", "line": 2, "body": "stale", "suggested_reply": ""},
-        ]))
+        seed_reply_owed("test", "r9", 5, 300, "live", path="src/a.py", line=1)
+        seed_reply_owed("test", "r9", 99, 301, "stale", path="src/b.py", line=2)
 
         resp = client.get("/api/today/loops")
         bucket = resp.json()["loops"]["pr_comments_needs_reply"]
