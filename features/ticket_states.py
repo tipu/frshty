@@ -24,10 +24,13 @@ from typing import Protocol, TypedDict
 import core.freshness as freshness
 import core.log as log
 import core.state as state
-from core.ticket_status import TicketStatus, approval_edge, epic_edge, tests_failed_edge
+from core.ticket_status import (TicketStatus, approval_edge, epic_edge, tests_failed_edge,
+                                transition)
 from pm import runner as pm_runner
 
 import features.pr_steward as pr_steward
+import features.ticket_pr as ticket_pr
+from features.pr_ci import failing_check_names
 import features.tickets as _t
 
 
@@ -96,8 +99,7 @@ class TicketState(TypedDict, total=False):
     - PR markers: prs, pr_scheduled_at, pr_attempts, pr_failed_reason
     - conflict markers: conflict_resolution_attempts, last_conflict_error
     - CI markers: ci_fix_attempts, ci_fix_heads, ci_passed, checks_started_at,
-      _ci_failed_pending, _ci_timeout_state, ci_held_unrelated, ci_triaged_checks
-    - comment markers: last_comment_ids, comment_fix_attempts
+      _ci_timeout_state, ci_held_unrelated
     - scope review markers: scope_review
     - misc: llm_sessions
     """
@@ -131,14 +133,10 @@ class TicketState(TypedDict, total=False):
     last_conflict_error: str
     ci_fix_attempts: int
     ci_fix_heads: dict
-    ci_triaged_checks: dict
     ci_passed: bool
     checks_started_at: str
-    _ci_failed_pending: bool
     _ci_timeout_state: dict
     ci_held_unrelated: bool
-    last_comment_ids: dict
-    comment_fix_attempts: dict
     scope_review: dict
     llm_sessions: dict
 
@@ -448,26 +446,19 @@ def _handle_in_review_ticket(
     existing: bool,
 ) -> tuple[dict, bool]:
     key = ticket["key"]
-    if instance_key and _t._resolve_conflicts_pending(instance_key, key):
-        state.save_ticket(key, ts)
-        return ts, True
-
     pr_info_map = _t._build_pr_info_map(_t.make_platform(config), ts.get("prs", []))
+    ts = _t._check_in_review(config, ticket, ts, base_url, pr_info_map=pr_info_map)
 
-    if instance_key:
-        if _t._has_conflicting_pr(config, ts, pr_info_map=pr_info_map):
-            _t._enqueue_stage(instance_key, key, "resolve_conflicts")
-            state.save_ticket(key, ts)
-            return ts, True
-    else:
-        ts = _t._resolve_conflicts(config, ticket, ts, base_url, pr_info_map=pr_info_map)
-
-    if (ts["status"] == "in_review" and instance_key
-            and config.get("pr", {}).get("auto_update_branch")
-            and _t._pr_base_moved(config, ts)):
-        _t._enqueue_stage(instance_key, key, "sync_pr_base")
-        state.save_ticket(key, ts)
-        return ts, True
+    if ts["status"] == "in_review":
+        conflicted = ticket_pr.conflict_capped(ts, pr_info_map)
+        if conflicted:
+            log.emit("ticket_conflict_failed",
+                f"Conflict resolution failed for {_t._label(key, ts)}: the base sync budget is spent "
+                f"on {', '.join(conflicted)}",
+                links={"detail": f"{base_url}/tickets/{key}"},
+                meta={"ticket": key, "prs": conflicted})
+            ts["status"] = transition(ts["status"], "pr_failed")
+            ts["pr_failed_reason"] = "conflict_failed"
 
     scope = _t._scope_review_state(config, ts) if instance_key else "disabled"
     if ts["status"] == "in_review" and instance_key and scope == "pending":
@@ -476,13 +467,22 @@ def _handle_in_review_ticket(
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
         ts.pop("ci_held_unrelated", None)
-        _t._drop_stale_unrelated(ts, pr_info_map)
         result = platform.monitor_ci(ticket, ts, base_url)
         if result.get("_ci_failed"):
-            failed_pr = result["pr"]
-            failed_info = pr_info_map.get((failed_pr["repo"], failed_pr["id"])) or {}
-            ts = _t._handle_ci_failure(ticket, ts, failed_pr, result["checks"], base_url, instance_key,
-                                       head_sha=failed_info.get("head_sha", ""))
+            ts.pop("ci_passed", None)
+            capped = ticket_pr.ci_capped(ts)
+            if capped:
+                failed_pr = result["pr"]
+                log.emit("ticket_checks_failed",
+                    f"CI failed for {_t._label(key, ts)} after the CI fix budget was spent: "
+                    f"{', '.join(failing_check_names(result['checks']))}",
+                    links={"detail": f"{base_url}/tickets/{key}", "pr": failed_pr.get("url", "")},
+                    meta={"ticket": key, "prs": capped,
+                          "failed_checks": failing_check_names(result["checks"])})
+                ts["ci_fix_heads"] = {f"{p['repo']}/{p['id']}": (pr_info_map.get((p["repo"], p["id"])) or {}).get("head_sha", "")
+                                      for p in ts.get("prs", [])}
+                ts["status"] = transition(ts["status"], "pr_failed")
+                ts["pr_failed_reason"] = "ci_failed"
         elif result.get("_ci_stalled"):
             pr = result.get("pr") or {}
             log.emit("ticket_checks_stall_repolling",
@@ -500,11 +500,9 @@ def _handle_in_review_ticket(
                                  freshness.pr_heads(ts.get("prs", []), pr_info_map),
                                  instance_key=instance_key)
 
-    if ts["status"] == "in_review":
-        ts = _t._check_in_review(config, ticket, ts, base_url, pr_info_map=pr_info_map)
-        if ts.get("status") == "in_review" and freshness.enabled(config):
-            freshness.record(key, "comments", freshness.watermark(ts),
-                             instance_key=instance_key)
+    if ts["status"] == "in_review" and freshness.enabled(config):
+        freshness.record(key, "comments", freshness.watermark(ts, instance_key),
+                         instance_key=instance_key)
 
     pr_cfg = config.get("pr", {})
     approval_rule = bool(pr_cfg.get("merge_when_all_approved"))

@@ -1,24 +1,24 @@
 import core.log as log
 from core.tasks.registry import TaskContext, TaskResult, task
-from core.tasks.preconditions import feature_enabled
+from core.tasks.preconditions import any_feature_enabled, feature_enabled
 from services import live_check, memory_history, work_dream
 
 
-@task("poll_own_prs", preconditions=[feature_enabled("review_prs")], timeout=180)
+@task("poll_own_prs", preconditions=[any_feature_enabled("review_prs", "tickets")], timeout=2400)
 def poll_own_prs(ctx: TaskContext) -> TaskResult:
     from features import own_prs
     own_prs.check(ctx.config)
     return TaskResult("ok")
 
 
-@task("fix_pr_comment", preconditions=[feature_enabled("review_prs")], timeout=900)
+@task("fix_pr_comment", preconditions=[any_feature_enabled("review_prs", "tickets")], timeout=900)
 def fix_pr_comment(ctx: TaskContext) -> TaskResult:
     from features import own_prs
     ok, reason = own_prs.fix_comment(ctx.config, ctx.payload)
     return TaskResult("ok") if ok else TaskResult("failed", reason)
 
 
-@task("fix_pr_comments", preconditions=[feature_enabled("review_prs")], timeout=1800)
+@task("fix_pr_comments", preconditions=[any_feature_enabled("review_prs", "tickets")], timeout=1800)
 def fix_pr_comments(ctx: TaskContext) -> TaskResult:
     from features import own_prs
     ok, reason = own_prs.fix_comments_batch(ctx.config, ctx.payload)

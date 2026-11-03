@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+import core.comments as comments
 import core.db as db
 import core.freshness as freshness
 import core.state as state
@@ -194,16 +195,19 @@ class TestSubjects:
         after = freshness.pr_heads(prs, {("api", 2): {"head_sha": "ccc"}})
         assert before != after
 
-    def test_the_watermark_carries_both_comment_kinds(self):
-        subject = freshness.watermark({"last_comment_ids": {"r/1": 7},
-                                       "last_issue_comment_ids": {"r/1": 3}})
-        assert '"review": {"r/1": 7}' in subject
-        assert '"issue": {"r/1": 3}' in subject
+    def test_the_watermark_names_each_pr(self, tmp_state):
+        comments.mark_comment_seen("inst", "pr", "r/1", "7", "2026-01-01T00:00:00Z")
+        subject = freshness.watermark({"prs": [{"repo": "r", "id": 1}, {"repo": "r", "id": 2}]},
+                                      "inst")
+        assert '"r/1": "' in subject
+        assert '"r/2": ""' in subject
 
-    def test_a_moved_watermark_changes_the_subject(self):
-        before = freshness.watermark({"last_comment_ids": {"r/1": 7}})
-        after = freshness.watermark({"last_comment_ids": {"r/1": 9}})
-        assert before != after
+    def test_a_moved_watermark_changes_the_subject(self, tmp_state):
+        ts = {"prs": [{"repo": "r", "id": 1}]}
+        comments.mark_comment_seen("inst", "pr", "r/1", "7", "2026-01-01T00:00:00Z")
+        before = freshness.watermark(ts, "inst")
+        comments.mark_comment_processing("inst", "pr", "r/1", "9", "2026-01-02T00:00:00Z")
+        assert freshness.watermark(ts, "inst") != before
 
     def test_the_digest_is_order_independent_and_content_sensitive(self):
         assert freshness.digest(["a", "b"]) == freshness.digest(["b", "a"])

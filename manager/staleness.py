@@ -7,11 +7,10 @@ status semantics instead.
 """
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import core.db as db
 import core.state as state
-from features.tickets import latest_pr_comments
+import features.ticket_pr as ticket_pr
 from services import work_store
 
 
@@ -437,8 +436,10 @@ def pending_approvals_stuck(instance_key: str, threshold_hours: int = 12) -> lis
 
 
 def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
-    """Tickets in_review with at least one pr_comments.json entry status='needs_reply'.
-    File-walk because pr_comments is on disk (features/tickets.py:829-832)."""
+    """Tickets in_review with at least one PR comment that waits for a reply.
+
+    Reads comment_state: a ticket PR comment that waits for a reply is a
+    'manual' row there."""
     rows = db.query_all(
         "SELECT ticket_key, slug, data FROM tickets"
         " WHERE instance_key=? AND status='in_review'"
@@ -446,30 +447,16 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
         " AND COALESCE(obsolete_at, '') = ''",
         (instance_key,),
     )
-    ws = config.get("workspace") or {}
-    root = ws.get("root")
-    tickets_dir = ws.get("tickets_dir", "tickets")
-    if not root:
-        return []
     out: list[dict] = []
     for r in rows:
-        slug = r["slug"]
-        if not slug:
+        if not r["slug"]:
             continue
-        path = Path(root) / tickets_dir / slug / "pr_comments.json"
-        if not path.is_file():
-            continue
-        try:
-            entries = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError, ValueError):
-            continue
-        if not isinstance(entries, list):
-            continue
-        entries = latest_pr_comments(entries)
-        needs_reply = [e for e in entries if isinstance(e, dict) and e.get("status") == "needs_reply"]
+        ticket = _load_ticket_data(r)
+        needs_reply = [e for e in ticket_pr.comment_rows(config, ticket)
+                       if e.get("status") == "needs_reply"]
         if not needs_reply:
             continue
-        d = _load_ticket_data(r)
+        d = ticket
         pr_url_by_key = {
             (p.get("repo"), p.get("id")): p.get("url", "")
             for p in (d.get("prs") or [])

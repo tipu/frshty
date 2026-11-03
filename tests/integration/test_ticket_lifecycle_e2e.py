@@ -1,4 +1,3 @@
-import json
 import subprocess
 import time
 from pathlib import Path
@@ -83,10 +82,6 @@ def _ticket(key: str = TICKET_KEY) -> dict:
     return ticket
 
 
-def _response_artifacts(row: dict) -> dict:
-    return json.loads(row["response"] or "{}").get("artifacts", {})
-
-
 def _init_repo(workspace_root: Path) -> tuple[Path, Path]:
     remote = workspace_root / "remote.git"
     local = workspace_root / REPO_NAME
@@ -123,6 +118,7 @@ class FakePlatform:
         self.bot_user = bot_user
         self._next_pr_id = 1
         self.prs: dict[int, dict] = {}
+        self.ci_green = False
 
     def self_id(self) -> str:
         return self.bot_user
@@ -221,7 +217,7 @@ class FakePlatform:
     def get_pr_checks(self, repo: str, pr_id: int) -> list[dict]:
         pr = self.prs[pr_id]
         latest = pr["snapshots"][-1]["contents"] if pr["snapshots"] else ""
-        state_name = "SUCCESS" if "ci_fixed\n" in latest else "FAILED"
+        state_name = "SUCCESS" if self.ci_green or "ci_fixed\n" in latest else "FAILED"
         return [{"name": "CI", "state": state_name, "url": f"https://ci.example.test/{pr_id}"}]
 
     def get_failed_logs(self, repo: str, pr_id: int) -> str:
@@ -325,9 +321,6 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             return "Lifecycle implementation with generated code, review fixes, and CI fixes."
         return "ok"
 
-    def fake_extract_json(raw: str):
-        return json.loads(raw)
-
     def fake_consensus_plan(config, ticket_dir: Path, slug: str, *, ticket_key: str = ""):
         """start_planning delegates planning to core.consensus_plan, which fans
         out to claude/codex/agy. Stub the subsystem at its boundary: this test
@@ -418,14 +411,13 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.tickets.make_platform", return_value=platform), \
          patch("core.tasks.tickets.make_platform", return_value=platform), \
          patch("features.tickets.run_haiku", side_effect=fake_run_haiku), \
-         patch("features.tickets.run_balanced", side_effect=fake_run_haiku), \
-         patch("features.tickets.extract_json", side_effect=fake_extract_json), \
+         patch("features.own_prs.make_platform", return_value=platform), \
+         patch("features.ticket_pr.make_platform", return_value=platform), \
          patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.commit_message.run_haiku",
                return_value="describe the pending change"), \
-         patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan), \
          patch("features.acceptance.run_haiku", side_effect=fake_run_haiku), \
          patch("features.acceptance.parse_structured", return_value=None):
@@ -494,27 +486,19 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             pr_id = state_after_pr["prs"][0]["id"]
             assert "review_fixed\n" in platform.prs[pr_id]["snapshots"][0]["contents"]
 
-            ci_fix = _wait_for_job("fix_ci_failures", TICKET_KEY)
-            assert _response_artifacts(ci_fix)["ci_fix_attempts"] == 1
-            assert _ticket()["status"] == "in_review"
-            assert _ticket()["ci_fix_attempts"] == 1
-            assert platform.prs[pr_id]["push_count"] >= 2
-            assert "ci_fixed\n" in platform.prs[pr_id]["snapshots"][-1]["contents"]
-
             _enqueue_and_wait(instance_key, "scan_tickets")
             assert _ticket()["status"] == "in_review"
+            assert "ci_passed" not in _ticket()
+
+            platform.ci_green = True
+            config["pr"]["auto_merge"] = True
+            _enqueue_and_wait(instance_key, "scan_tickets")
+            assert _ticket()["status"] == "in_review", "the own-PR poll has not read the comments yet"
             assert _ticket()["ci_passed"] is True
 
-            comment = platform.add_comment(pr_id, "Please add the review_comment_fixed marker to app.txt.")
-            _enqueue_and_wait(instance_key, "scan_tickets")
-            assert _ticket()["status"] == "in_review"
-            assert comment["id"] in platform.prs[pr_id]["resolved_comment_ids"]
-            assert platform.prs[pr_id]["push_count"] == 3
-            assert "review_comment_fixed\n" in platform.prs[pr_id]["snapshots"][-1]["contents"]
-            comment_log = json.loads((ticket_dir / "pr_comments.json").read_text())
-            assert comment_log[-1]["status"] == "addressed"
+            _enqueue_and_wait(instance_key, "poll_own_prs")
+            assert state.load("own_prs")[f"{REPO_NAME}/{pr_id}"]["ticket_key"] == TICKET_KEY
 
-            config["pr"]["auto_merge"] = True
             _enqueue_and_wait(instance_key, "scan_tickets")
             final_state = _ticket()
             assert final_state["status"] == "merged"

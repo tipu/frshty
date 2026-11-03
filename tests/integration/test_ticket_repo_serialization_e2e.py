@@ -337,16 +337,16 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
 
     with patch("features.tickets.make_ticket_system", return_value=ticket_system), \
          patch("features.tickets.make_platform", return_value=platform), \
+         patch("features.own_prs.make_platform", return_value=platform), \
+         patch("features.ticket_pr.make_platform", return_value=platform), \
          patch("core.tasks.tickets.make_platform", return_value=platform), \
          patch("features.tickets.run_haiku", side_effect=fake_run_haiku), \
-         patch("features.tickets.extract_json", side_effect=fake_extract_json), \
          patch("core.tasks.tickets.run_haiku", side_effect=fake_run_haiku), \
          patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.commit_message.run_haiku",
                return_value="describe the pending change"), \
-         patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan):
         pool.start()
         try:
@@ -370,6 +370,7 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
                     break
                 if time.time() - last_kick > 0.4:
                     q.enqueue_job(instance_key, "scan_tickets")
+                    q.enqueue_job(instance_key, "poll_own_prs")
                     last_kick = time.time()
                 time.sleep(0.05)
         finally:

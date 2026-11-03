@@ -20,10 +20,12 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+import core.comments as core_comments
 import core.db as db
 import core.log as log
 import core.queue as q
 import core.state as state
+import features.ticket_pr as ticket_pr
 import features.tickets as _t
 from core.claude_runner import run_haiku, parse_structured, strict_object
 from core.config import base_branch_for
@@ -86,8 +88,8 @@ def claim_fingerprint(instance_key: str, key: str, fingerprint: str) -> bool:
 
 
 def _comment_ref(comment: dict) -> str:
-    kind, cid = _t._comment_key(comment)
-    return f"{kind}:{cid}"
+    kind = "issue_comment" if comment.get("comment_kind") == "issue_comment" else "review"
+    return f"{kind}:{comment.get('id')}"
 
 
 def _base_branch(config: dict, pr: dict) -> str:
@@ -177,27 +179,26 @@ def _prompt(ticket_key: str, ts: dict, pr: dict, base: str, head: str,
     return "".join(parts)
 
 
-def _current_comment_decisions(config: dict, ts: dict, pr: dict, comments: list[dict],
-                               live: list[dict]) -> dict:
-    entries = _t._latest_comment_entries(_t._load_pr_comments(config, ts.get("slug") or ""),
-                                         pr["repo"], pr["id"], _t._live_comment_index(live))
-    return {_comment_ref(c): (entries.get(_t._comment_key(c)) or {}).get("status", "unregistered")
+def _current_comment_decisions(config: dict, pr: dict, comments: list[dict]) -> dict:
+    instance_key = (config.get("job") or {}).get("key") or ""
+    rows = {str(r["comment_id"]): r
+            for r in core_comments.get_comment_rows(instance_key, "pr", _pr_key(pr))}
+    return {_comment_ref(c): (ticket_pr.ledger_status(rows[str(c["id"])])
+                              if str(c["id"]) in rows else "unregistered")
             for c in comments}
 
 
 def _current_check_decisions(ts: dict, pr: dict, red: list[str]) -> dict:
-    key = _pr_key(pr)
-    unrelated = ts.get("ci_unrelated_checks")
-    unrelated = set(unrelated.get(key) or []) if isinstance(unrelated, dict) else set()
-    triaged = set((ts.get("ci_triaged_checks") or {}).get(key) or [])
+    seen = ticket_pr.ticket_pr_seen(ts).get(_pr_key(pr)) or {}
+    unrelated = set(seen.get("ci_unrelated_checks") or [])
     out = {}
     for name in red:
         if name in unrelated:
             out[name] = "unrelated"
-        elif name in triaged:
+        elif seen.get("ci_cap_emitted"):
+            out[name] = "capped"
+        elif seen.get("ci_fix_attempts"):
             out[name] = "fix_attempted"
-        elif ts.get("_ci_failed_pending"):
-            out[name] = "fix_queued"
         else:
             out[name] = "untriaged"
     return out
@@ -213,7 +214,7 @@ def _current_merge(config: dict, ts: dict) -> dict:
     scope = _t._scope_review_state(config, ts)
     scope_ok = (scope in ("disabled", "pass")
                 or (approval_rule and scope == "fail" and not _t._scope_fix_incomplete(ts)))
-    hold = _t.merge_hold_reason(ts)
+    hold = ticket_pr.merge_hold_reason(config, ts)
     unapproved = [f"{p['repo']}#{p['id']}" for p in _t._unapproved_prs(config, ts)]
     ci_passed = bool(ts.get("ci_passed"))
     gates_clear = ci_passed and scope_ok and not hold and not unapproved
@@ -263,7 +264,7 @@ def run_shadow(config: dict, payload: dict) -> tuple[str, str]:
                  links=links, meta={**meta, "reason": "no_valid_decisions"})
         return "failed", "steward returned no valid decisions"
 
-    current_comments = _current_comment_decisions(config, ts, pr, comments, live)
+    current_comments = _current_comment_decisions(config, pr, comments)
     current_checks = _current_check_decisions(ts, pr, red)
     current_merge = _current_merge(config, ts)
     steward_comments = {d["id"]: d for d in decisions["comments"]}

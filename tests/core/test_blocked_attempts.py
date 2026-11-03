@@ -128,29 +128,6 @@ class TestTheLoopDetectorStopsTheNextJob:
         assert blocked_attempts.job_blocked("t", "T-1", "advance_ticket") is None
 
 
-class TestABaseSyncThatDidNotMergeFails:
-    def test_a_dirty_worktree_sync_trips_the_stage_retry_cap(self, pool):
-        state.save_ticket("DEV-624", {
-            "status": "in_review", "branch": "dev-624-branch",
-            "prs": [{"repo": "app", "id": 31, "url": "http://pr/31", "base": "main"}]})
-        dirty = {"result": "dirty_worktree", "capped": True, "attempts": 2,
-                 "error": "worktree has uncommitted changes (a.py); merge would overwrite them"}
-        runs = 0
-        with patch("features.tickets.make_platform", return_value=MagicMock()), \
-             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.sync_branch_with_base", return_value=dirty):
-            for _ in range(30):
-                if tix._enqueue_stage("t", "DEV-624", "sync_pr_base"):
-                    runs += _run_queue(pool)
-        assert _statuses("sync_pr_base") == ["failed"] * tix.MAX_STAGE_RETRIES
-        assert runs == tix.MAX_STAGE_RETRIES, (
-            "a sync that reported ok on an aborted merge ran on every tick")
-        reason = json.loads(db.query_one(
-            "SELECT response FROM jobs WHERE task='sync_pr_base' ORDER BY id DESC LIMIT 1",
-            ())["response"])["reason"]
-        assert reason.startswith("app#31 dirty_worktree: worktree has uncommitted changes")
-
-
 class TestARefusedPushWaitsForTheBranchHead:
     REFUSED = "2 commit(s) on feature are not authored by me; refusing to push"
 

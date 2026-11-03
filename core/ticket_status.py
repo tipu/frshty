@@ -162,7 +162,7 @@ class Cycle:
 # ticket is. That disagreement is the operator's to settle, so the gate goes
 # back to holding the branch once the budget is spent.
 SCOPE_FIX = Cycle("scope_fix", TicketStatus.proving, "fix_scope_findings", 2)
-BASE_SYNC = Cycle("base_sync", TicketStatus.in_review, "sync_pr_base", 2)
+BASE_SYNC = Cycle("base_sync", None, "poll_own_prs", 2)
 PR_AUTOFIX = Cycle("pr_autofix", None, "pr_autofix_run", 3)
 AUTOMATED_REVIEW_FIX = Cycle("automated_review_fix", None, "fix_pr_comments", 2)
 TEST_FIX = Cycle("test_fix", TicketStatus.testing, "run_tests_and_fix", 3,
