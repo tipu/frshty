@@ -1,3 +1,4 @@
+import json
 import re
 from datetime import datetime, timezone
 
@@ -438,6 +439,116 @@ def unowed_comment_ids(
     manual = {str(row["comment_id"]) for row in rows}
     return settled_comment_ids(instance_key, resource_type, resource_id,
                                present_ids) | manual
+
+
+OWED_STATES = ("new", "processing", "deferred", "manual")
+
+
+def record_comment_detail(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment: dict,
+) -> None:
+    """Keep the text and place of a comment beside its state.
+
+    The ticket pages list each comment with what it says and where it sits,
+    after the platform has stopped reporting it."""
+    db.execute(
+        """
+        UPDATE comment_state
+        SET body = ?, path = ?, line = ?, url = ?, comment_kind = ?, diff_hunk = ?, created_at = ?
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ? AND comment_id = ?
+        """,
+        (comment.get("body") or "", comment.get("path"),
+         comment.get("line") if isinstance(comment.get("line"), int) else None,
+         comment.get("html_url") or comment.get("url") or "", comment.get("comment_kind"),
+         (comment.get("diff_hunk") or "")[:4000],
+         comment.get("created_at") or comment.get("created_on") or "",
+         instance_key, resource_type, resource_id, str(comment["id"])),
+    )
+
+
+def set_comment_reply(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+    reply: str,
+) -> None:
+    """Store the reply drafted for a comment, or the one the operator sent."""
+    db.execute(
+        """
+        UPDATE comment_state SET suggested_reply = ?
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ? AND comment_id = ?
+        """,
+        (reply, instance_key, resource_type, resource_id, str(comment_id)),
+    )
+
+
+def set_comment_defence(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+    result: dict,
+) -> bool:
+    """Write the evidence run for a drafted reply onto its comment."""
+    with db.tx() as conn:
+        cur = conn.execute(
+            """
+            UPDATE comment_state SET defence = ?
+            WHERE instance_key = ? AND resource_type = ? AND resource_id = ? AND comment_id = ?
+            """,
+            (json.dumps(result, default=str), instance_key, resource_type, resource_id,
+             str(comment_id)),
+        )
+        return cur.rowcount > 0
+
+
+def get_comment_rows(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+) -> list[dict]:
+    """Every tracked comment for a resource, with its detail columns."""
+    return db.query_all(
+        """
+        SELECT * FROM comment_state
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+        ORDER BY created_at ASC, comment_id ASC
+        """,
+        (instance_key, resource_type, resource_id),
+    )
+
+
+def import_comment(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    row: dict,
+) -> bool:
+    """Insert one comment that another ledger tracked. An existing row wins."""
+    with db.tx() as conn:
+        cur = conn.execute(
+            """
+            INSERT OR IGNORE INTO comment_state (
+                instance_key, resource_type, resource_id, comment_id, comment_edited_at,
+                last_checked_at, state, error_count, last_error, processed_at, fix_count,
+                body, path, line, url, comment_kind, diff_hunk, created_at,
+                suggested_reply, defence
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (instance_key, resource_type, resource_id, str(row["comment_id"]),
+             row.get("comment_edited_at"), datetime.now(timezone.utc).isoformat(),
+             row["state"], row.get("error_count", 0), row.get("last_error"),
+             row.get("processed_at"), row.get("fix_count", 0), row.get("body"),
+             row.get("path"), row.get("line"), row.get("url"), row.get("comment_kind"),
+             row.get("diff_hunk"), row.get("created_at"), row.get("suggested_reply"),
+             json.dumps(row["defence"], default=str) if row.get("defence") else None),
+        )
+        return cur.rowcount > 0
 
 
 def get_unprocessed_comments(

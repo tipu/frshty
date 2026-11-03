@@ -3,6 +3,7 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import core.freshness as freshness
 import core.log as log
 import core.queue as q
 import core.state as state
@@ -16,6 +17,7 @@ from core.claude_runner import (run_claude_code, run_haiku, run_balanced, parse_
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import base_branch_for, get_repos
 from features.pr_ci import FILE_TOOLS_KEEP_GREEN_RULE, ci_summary
+import features.ticket_pr as ticket_pr
 from features.platforms import make_platform
 from features.pr_worktree_gc import mark_used
 
@@ -24,6 +26,7 @@ MAX_COMMENT_RETRIES = 3
 NEW_COMMENT_BASELINE_HOURS = 24
 COMMENT_DEBOUNCE_MINUTES = 30
 INACTIVE_PR_DAYS = 30
+MAX_CI_FIX_ATTEMPTS = 2
 CLASSIFY_FAILED = "classification failed"
 NO_CHANGES = "no changes produced"
 NO_CHANGE_REASON = "the fix run read the comment and changed nothing"
@@ -50,12 +53,11 @@ _worktree_lock = git_util.worktree_lock
 
 
 def _ticket_owns(pr: dict) -> str:
-    """Ticket key that already drives this PR, or "".
+    """Ticket key whose PR this is, or "".
 
     Read fresh per PR instead of once per poll: the ticket pipeline adopts a
-    manually opened PR as soon as it sees it, and a poll that started before
-    the adoption would otherwise keep driving the same branch from a second
-    worktree, duplicating CI fixes and comment fixes."""
+    manually opened PR as soon as it sees it, and the poll then drives it with
+    the ticket flag on."""
     for ticket_key, ts in state.load("tickets").items():
         for p in ts.get("prs", []):
             if p.get("repo") == pr["repo"] and p.get("id") == pr["id"]:
@@ -73,23 +75,32 @@ def check(config: dict):
     pr_state = state.load("own_prs")
     base_url = config["_base_url"]
 
+    review_prs = bool(config.get("features", {}).get("review_prs"))
     active_keys: set[str] = set()
     heads_cache: dict = {}
     now = datetime.now(timezone.utc)
     for pr in my_prs:
-        if _ticket_owns(pr):
+        ticket_key = _ticket_owns(pr)
+        if not ticket_key and not review_prs:
             continue
         pr_key = f"{pr['repo']}/{pr['id']}"
         active_keys.add(pr_key)
         seen = pr_state.get(pr_key, {})
+        if ticket_key:
+            seen["ticket_key"] = ticket_key
+        else:
+            seen.pop("ticket_key", None)
 
         _cache_pr_metadata(platform, pr, seen)
-        if _recently_updated(pr, now):
-            _check_comments(config, instance_key, platform, pr, base_url, seen=seen)
-            if not _ticket_owns(pr):
-                _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=heads_cache)
-                _check_ci(config, platform, pr, seen, base_url, heads_cache=heads_cache)
-        _check_stale(pr, seen, base_url)
+        if ticket_key or _recently_updated(pr, now):
+            _check_comments(config, instance_key, platform, pr, base_url, seen=seen,
+                            ticket_key=ticket_key or None)
+            _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=heads_cache,
+                              ticket_key=ticket_key)
+            _check_ci(config, platform, pr, seen, base_url, heads_cache=heads_cache,
+                      budget_used=_ticket_ci_attempts(pr_state, pr_key, ticket_key))
+        if not ticket_key:
+            _check_stale(pr, seen, base_url)
 
         pr_state[pr_key] = seen
 
@@ -97,6 +108,16 @@ def check(config: dict):
         del pr_state[stale_key]
 
     state.save("own_prs", pr_state)
+
+
+def _ticket_ci_attempts(pr_state: dict, pr_key: str, ticket_key: str) -> int:
+    """CI fix attempts the other PRs of the same ticket spent.
+
+    A ticket has one CI fix budget for all of its PRs."""
+    if not ticket_key:
+        return 0
+    return sum(v.get("ci_fix_attempts", 0) for k, v in pr_state.items()
+               if k != pr_key and isinstance(v, dict) and v.get("ticket_key") == ticket_key)
 
 
 def _recently_updated(pr: dict, now: datetime) -> bool:
@@ -146,6 +167,7 @@ def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
     except Exception:
         info = {}
     approvers = info.get("approvers") or []
+    seen["mergeable"] = info.get("mergeable", "UNKNOWN")
     seen["approvers"] = approvers
     seen["review_state"] = "approved" if approvers else "pending"
     try:
@@ -245,12 +267,19 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
         seen = {}
 
     platform_comments = platform.get_pr_comments(pr["repo"], pr["id"])
+    seen["comments_read_ok"] = platform_comments is not None
     if platform_comments is None:
         log.emit("pr_comments_read_failed",
                  f"{pr_ref}: could not read comments — reconcile skipped",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
                  meta={"repo": pr["repo"], "pr_id": pr["id"]})
         return
+    if ticket_key and not seen.get("ledger_imported"):
+        if not _import_ticket_ledger(config, instance_key, ticket_key, pr, pr_ref, base_url,
+                                     platform_comments):
+            seen["comments_read_ok"] = False
+            return
+        seen["ledger_imported"] = True
     first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
     present_ids = {str(c["id"]) for c in platform_comments}
     for thread_key in _reopen_answered_threads(
@@ -307,6 +336,27 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
 
     _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key,
                              skips)
+
+
+def _import_ticket_ledger(config, instance_key, ticket_key, pr, pr_ref, base_url,
+                          platform_comments) -> bool:
+    """Copy the ticket engine's pr_comments.json rows for this PR into
+    comment_state before the first poll reads them. False holds the comment
+    pass: a file that cannot be read may hold comments still owed."""
+    ts = state.load_ticket(ticket_key) or {}
+    written = ticket_pr.import_ledger(config, instance_key, ts, pr, platform_comments)
+    if written is None:
+        log.emit("ticket_pr_comments_history_unreadable",
+                 f"{ticket_key} · {pr_ref}: pr_comments.json cannot be read; holding the comment pass",
+                 links={"pr": pr["url"], "detail": f"{base_url}/tickets/{ticket_key}"},
+                 meta={"ticket": ticket_key, "repo": pr["repo"], "pr_id": pr["id"]})
+        return False
+    if written:
+        log.emit("ticket_pr_comments_imported",
+                 f"{ticket_key} · {pr_ref}: copied {written} comment(s) from pr_comments.json into comment_state",
+                 links={"pr": pr["url"], "detail": f"{base_url}/tickets/{ticket_key}"},
+                 meta={"ticket": ticket_key, "repo": pr["repo"], "pr_id": pr["id"], "count": written})
+    return True
 
 
 def _untriaged_comments(instance_key, pr_key, by_id, user_id, queued_ids, skips):
@@ -478,6 +528,7 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
         meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id}
 
         comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
+        comments.record_comment_detail(instance_key, "pr", pr_key, comment)
 
         log.emit("pr_comment_registered", f"{pr_ref}: Comment registered — {comment['body'][:80]}", links=links, meta=meta)
 
@@ -495,10 +546,50 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
         elif is_bot_report(comment):
             log.emit("pr_comment_bot_report_settled", f"{pr_ref}: Bot report, no change asked ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
             comments.mark_comment_seen(instance_key, "pr", pr_key, comment_id, edited_at)
+        elif ticket_key:
+            _route_ticket_comment(config, instance_key, pr, pr_ref, comment, edited_at, reason,
+                                  links, meta, seen, ticket_key)
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
             comments.mark_comment_manual(instance_key, "pr", pr_key, comment_id,
                                          reason or "needs a human reply")
+
+
+def _route_ticket_comment(config, instance_key, pr, pr_ref, comment, edited_at, reason,
+                          links, meta, seen, ticket_key) -> None:
+    """Settle a ticket PR comment that asks for no code change.
+
+    A statement that asks for nothing closes. Anything else gets a drafted
+    reply. A draft that promises a change shows the comment asked for one, so
+    it goes to the fixer. Otherwise the comment waits for the operator with
+    the draft beside it, and the evidence run on the draft is queued."""
+    pr_key = f"{pr['repo']}/{pr['id']}"
+    comment_id = str(comment["id"])
+    meta = {**meta, "ticket": ticket_key}
+    if ticket_pr.comment_needs_no_reply(comment["body"]):
+        log.emit("ticket_pr_comment_no_reply_needed",
+                 f"{ticket_key} · {pr_ref}: No reply needed — {comment['body'][:80]}",
+                 links=links, meta=meta)
+        comments.mark_comment_seen(instance_key, "pr", pr_key, comment_id, edited_at)
+        return
+    ts = state.load_ticket(ticket_key) or {}
+    suggested = ticket_pr.draft_comment_reply(config, ts, comment, pr, _worktree_path(config, pr))
+    comments.set_comment_reply(instance_key, "pr", pr_key, comment_id, suggested)
+    if ticket_pr.reply_commits_to_change(suggested):
+        comments.mark_comment_deferred(instance_key, "pr", pr_key, comment_id, edited_at)
+        _push_fix_deadline(config, seen)
+        log.emit("ticket_pr_comment_reclassified",
+                 f"{ticket_key} · {pr_ref}: Draft reply commits to a code change, routing to fix — {comment['body'][:80]}",
+                 links=links, meta={**meta, "draft_reply": suggested[:200]})
+        return
+    log.emit("ticket_pr_comment_needs_reply",
+             f"{ticket_key} · {pr_ref}: Reply needed — {comment['body'][:80]}",
+             links=links, meta=meta)
+    comments.mark_comment_manual(instance_key, "pr", pr_key, comment_id,
+                                 reason or ticket_pr.NEEDS_REPLY)
+    comments.set_comment_defence(instance_key, "pr", pr_key, comment_id,
+                                 ticket_pr.substantiate_reply(config, ticket_key, pr, comment_id,
+                                                              suggested))
 
 
 def _is_stale(ts, now, seconds) -> bool:
@@ -614,7 +705,9 @@ def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url,
     if not comment_ids:
         return
 
-    q.enqueue_job(instance_key, "fix_pr_comments", payload={"pr": pr, "comment_ids": comment_ids}, ticket_key=ticket_key)
+    q.enqueue_job(instance_key, "fix_pr_comments",
+                  payload={"pr": pr, "comment_ids": comment_ids, "ticket_key": ticket_key or ""},
+                  ticket_key=ticket_key)
     log.emit("pr_comments_batch_queued",
              f"{pr_ref}: Debounce window closed — queued one batch fix for {len(comment_ids)} comment(s)",
              links={"pr": pr["url"], "detail": f"{base_url}/"},
@@ -878,6 +971,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 return _fail_all(pending_ids, "push failed")
             for cid in pending_ids:
                 comments.record_comment_fix(instance_key, "pr", pr_key, cid)
+            _invalidate_ticket_claims(config, payload.get("ticket_key") or "",
+                                      "ticket_pr_comment_fixed")
 
         unresolved = []
         pending_by_id = {str(c["id"]): c for c in pending}
@@ -911,8 +1006,14 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
         return False, reason
 
 
-def _check_ci(config, platform, pr, seen, base_url, heads_cache=None):
-    from features.tickets import MAX_CI_FIX_ATTEMPTS
+def _invalidate_ticket_claims(config, ticket_key: str, reason: str) -> None:
+    """A push to a ticket PR makes the ticket's proof and CI verdict stale."""
+    if ticket_key and freshness.enabled(config):
+        for claim in ("proof", "ci"):
+            freshness.invalidate(ticket_key, claim, reason)
+
+
+def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_used=0):
     from features.pr_ci import (triage_and_fix_pr, ci_summary, FAILED_STATES,
                                 PENDING_STATES)
 
@@ -972,7 +1073,7 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None):
         if {c["name"] for c in failing} <= unrelated:
             return
 
-        attempts = seen.get("ci_fix_attempts", 0)
+        attempts = seen.get("ci_fix_attempts", 0) + budget_used
         pr_ref = f"{pr['repo']}#{pr['id']}"
         pr_link = {"pr": pr["url"], "detail": f"{base_url}/"}
         meta = {"repo": pr["repo"], "pr_id": pr["id"],
@@ -1012,7 +1113,7 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None):
             new_head = subprocess.run(["git", "rev-parse", "HEAD"],
                                         cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
             seen["ci_fix_sha"] = new_head
-            seen["ci_fix_attempts"] = outcome["attempts"]
+            seen["ci_fix_attempts"] = outcome["attempts"] - budget_used
             seen.pop("ci_cap_emitted", None)
             log.emit("pr_ci_fix_sent",
                      f"{pr_ref}: Sent CI fix (attempt {outcome['attempts']}/{MAX_CI_FIX_ATTEMPTS}): {outcome.get('fix_hint','')[:80]}",
@@ -1033,8 +1134,14 @@ def _repo_path_for(config, pr):
     return None
 
 
-def _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=None):
-    if not config.get("pr", {}).get("auto_update_branch"):
+def _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=None, ticket_key=""):
+    """Merge the base into the PR branch. The merge resolves conflicts too.
+
+    It runs under [pr] auto_update_branch. A ticket PR that conflicts with
+    its base gets the merge without that setting: the ticket cannot merge
+    until the conflict is gone."""
+    conflicting = bool(ticket_key) and seen.get("mergeable") == "CONFLICTING"
+    if not config.get("pr", {}).get("auto_update_branch") and not conflicting:
         return
     base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
     repo_path = _repo_path_for(config, pr)
@@ -1061,6 +1168,7 @@ def _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=None):
         seen["base_merge_pending"] = True
         log.emit("pr_base_synced", f"{pr_ref}: merged {base_branch} into PR branch",
                  links=links, meta=meta)
+        _invalidate_ticket_claims(config, ticket_key, "ticket_base_synced")
     elif result == "dirty_worktree":
         log.emit("pr_base_sync_blocked",
                  f"{pr_ref}: cannot merge {base_branch}: {outcome.get('error', '')[:160]}",
@@ -1084,10 +1192,13 @@ def _check_stale(pr, seen, base_url):
         seen["stale_notified"] = True
 
 
+def _worktree_path(config, pr) -> Path:
+    return config["_state_dir"] / "pr_worktrees" / pr["branch"].replace("/", "-")
+
+
 def _ensure_worktree(config, pr, heads_cache=None) -> Path | None:
     state_dir = config["_state_dir"]
-    branch_slug = pr["branch"].replace("/", "-")
-    worktree_path = state_dir / "pr_worktrees" / branch_slug
+    worktree_path = _worktree_path(config, pr)
 
     repos = get_repos(config)
     if not repos:

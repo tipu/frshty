@@ -12,6 +12,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocket
 
 import core.blocked as blocked_attempts
+import core.comments as core_comments
 import core.config as cfg
 import core.consensus_scope as consensus_scope
 import core.db as db
@@ -26,6 +27,7 @@ import core.worker as worker
 import features.presentation as presentation
 import features.releases as releases
 import features.ticket_timeline as ticket_timeline
+import features.ticket_pr as ticket_pr
 import features.tickets as _tickets_mod
 from core.claude_runner import run_haiku
 from core.config import get_repos
@@ -590,8 +592,7 @@ def api_tickets_pr_board():
         prs = ts.get("prs") or []
         if not prs:
             continue
-        slug = ts.get("slug", "")
-        entries = _tickets_mod._load_pr_comments(_config, slug) if slug else []
+        entries = ticket_pr.comment_rows(_config, ts)
         rows = []
         for pr in prs:
             if pr.get("pr_state") == "MERGED":
@@ -1131,7 +1132,7 @@ def api_ticket_pr_comments(key: str):
     ts = tickets.get(key)
     if not ts:
         return []
-    return _tickets_mod._load_pr_comments(_config, ts.get("slug", ""))
+    return ticket_pr.comment_rows(_config, ts)
 
 
 @router.get("/api/tickets/{key}/pr-comments/{comment_id}/timeline")
@@ -1149,13 +1150,7 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    slug = ts.get("slug", "")
-    ws = _config["workspace"]
-    path = ws["root"] / ws["tickets_dir"] / slug / "pr_comments.json"
-    if not path.exists():
-        return JSONResponse({"error": "no comments"}, status_code=404)
-
-    comments = _tickets_mod._load_pr_comments(_config, slug)
+    comments = ticket_pr.comment_rows(_config, ts)
     entry = next((c for c in comments if c["id"] == comment_id), None)
     if not entry:
         return JSONResponse({"error": "comment not found"}, status_code=404)
@@ -1167,9 +1162,10 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
     )
 
     if result.get("status") == "posted":
-        entry["status"] = "replied"
-        entry["suggested_reply"] = body
-        _tickets_mod._save_pr_comments(_config, slug, comments)
+        instance_key = _config.get("job", {}).get("key", "")
+        pr_key = f"{entry['pr_repo']}/{entry['pr_id']}"
+        core_comments.set_comment_reply(instance_key, "pr", pr_key, str(comment_id), body)
+        core_comments.mark_comment_processed(instance_key, "pr", pr_key, str(comment_id))
         log.emit("ticket_pr_reply_sent", f"Replied to comment on {key}",
             links={"detail": f"{_config['_base_url']}/tickets/{key}"},
             meta={"ticket": key, "comment_id": comment_id})
@@ -1202,7 +1198,7 @@ def _merge_ticket_sync(key: str, force: bool):
         return JSONResponse({"error": f"ticket is {ts.get('status')}, not in_review"}, status_code=400)
     if not ts.get("prs"):
         return JSONResponse({"error": "no PRs to merge"}, status_code=400)
-    hold, owed_comments = _tickets_mod.reconcile_comments_now(_config, ts)
+    hold, owed_comments = ticket_pr.reconcile_comments_now(_config, ts)
     if hold and not force:
         return JSONResponse(
             {"error": f"merge held: {hold}",

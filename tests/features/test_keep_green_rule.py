@@ -14,8 +14,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from features import own_prs, pr_autofix, pr_ci, tickets
-from tests.conftest import make_comment, make_pr, make_ticket_state
+from features import own_prs, pr_autofix, pr_ci
+from tests.conftest import make_comment, make_pr
 
 
 def _checks(*pairs):
@@ -165,38 +165,3 @@ class TestCommentFixersCarryTheRule:
             "first sent the agent after git and test commands the run refuses, and "
             "it ended with no edit or at the timeout")
 
-    def test_ticket_pr_comment_fix(self, fresh_db, fake_config, tmp_state):
-        slug = "PROJ-1-do-the-thing"
-        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
-        wt.mkdir(parents=True, exist_ok=True)
-        (wt / ".git").mkdir(exist_ok=True)
-        ts = make_ticket_state(
-            status="in_review", slug=slug, branch=slug,
-            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
-        )
-        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
-        comment = {"id": 100, "body": "Please rename this variable",
-                   "author_id": "reviewer1", "author_name": "Bob",
-                   "path": "src/main.py", "line": 42, "parent_id": None,
-                   "created_on": "2026-01-01T12:00:00Z",
-                   "created_at": "2026-01-01T12:00:00Z",
-                   "updated_at": "2026-01-01T12:00:00Z"}
-        platform = MagicMock()
-        platform.get_pr_state.return_value = "OPEN"
-        platform.get_pr_comments.return_value = [comment]
-        bb_config = {
-            **fake_config,
-            "job": {**fake_config["job"], "platform": "bitbucket"},
-            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
-        }
-        with patch("features.tickets.make_platform", return_value=platform), \
-             patch("features.tickets.get_repos",
-                   return_value=[{"name": "repo", "path": wt.parent}]), \
-             patch("features.tickets.ticket_worktree_path", return_value=wt), \
-             patch("features.tickets.run_balanced",
-                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
-             patch("features.tickets.run_claude_code", return_value=None) as fixer, \
-             patch("features.tickets.subprocess.run",
-                   return_value=MagicMock(returncode=0)):
-            tickets._check_in_review(bb_config, ticket, ts, "http://base")
-        assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]

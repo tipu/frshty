@@ -6,7 +6,7 @@ triaged. The smoke pool replayed. Each claim is established once and then
 decays on its own schedule, and today each one is written by a single caller
 for a single purpose. No query can ask whether a ticket is still what it
 claimed to be, because the answer is spread across proof_fingerprint,
-ci_passed, last_comment_ids and the base_sync record, and nothing reads them
+ci_passed, comment_state and the base_sync record, and nothing reads them
 together.
 
 This module records the claims and the events that stale them. It decides
@@ -24,6 +24,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
+import core.comments as comments
 import core.db as db
 import core.log as log
 import core.state as state
@@ -51,12 +52,18 @@ def digest(parts) -> str:
     return hashlib.sha1(joined.encode()).hexdigest()[:16]
 
 
-def watermark(ts: dict) -> str:
-    """The comment watermark a ticket has triaged up to, as a stable string."""
-    return json.dumps(
-        {"review": ts.get("last_comment_ids") or {},
-         "issue": ts.get("last_issue_comment_ids") or {}},
-        sort_keys=True, default=str)
+def watermark(ts: dict, instance_key: str) -> str:
+    """The comments a ticket's PRs have been triaged up to, as a stable string.
+
+    Each comment_state row counts with its edit time and its state, so a new
+    comment, an edit or a settled comment moves the watermark."""
+    out = {}
+    for pr in ts.get("prs") or []:
+        pr_key = f"{pr.get('repo', '')}/{pr.get('id', '')}"
+        out[pr_key] = digest(
+            f"{r['comment_id']}@{r['comment_edited_at']}:{r['state']}"
+            for r in comments.get_comment_rows(instance_key, "pr", pr_key))
+    return json.dumps(out, sort_keys=True, default=str)
 
 
 def pr_heads(prs: list[dict], pr_info_map: dict | None = None) -> str:

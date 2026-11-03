@@ -38,6 +38,14 @@ def feature_enabled(name: str) -> Callable:
     return check
 
 
+def any_feature_enabled(*names: str) -> Callable:
+    def check(ctx):
+        features = ctx.config.get("features", {})
+        enabled = any(bool(features.get(n)) for n in names)
+        return (enabled, f"none of features.{', features.'.join(names)} is on")
+    return check
+
+
 def _ticket_dir(ctx) -> Path:
     ws = ctx.config["workspace"]
     t = _ticket(ctx)

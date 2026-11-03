@@ -15,7 +15,7 @@ import manager.runner as runner
 import manager.staleness as staleness
 from core.config import get_repos
 from core.tasks.autonomy import KV_KEY as _TODAY_KV_KEY
-from features.tickets import _load_pr_comments
+import features.ticket_pr as ticket_pr
 from manager.planner import build_plan
 from services import work_store
 from web.state import _config
@@ -339,8 +339,7 @@ def _build_context(loop_type: str, ticket_key: str | None, repo: str | None, pr_
     head = f"{ticket_key}: {summary}".strip(": ").strip() or _title(loop_type, ticket_key, repo, pr_id)
 
     if loop_type == "pr_comments_needs_reply" and ticket:
-        slug = ticket.get("slug", "")
-        comments = [c for c in _load_pr_comments(_config, slug) if c.get("status") == "needs_reply"]
+        comments = [c for c in ticket_pr.comment_rows(_config, ticket) if c.get("status") == "needs_reply"]
         pr_url = ""
         for pr in ticket.get("prs") or []:
             if pr.get("url"):

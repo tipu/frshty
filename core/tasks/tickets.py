@@ -34,7 +34,7 @@ from core.ticket_status import SCOPE_FIX, TEST_FIX
 import features.defence as defence
 import features.pr_steward as pr_steward
 from core.tasks.preconditions import (
-    status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
+    status_is, auto_pr_true, file_exists, file_contains, feature_enabled,
     repo_gate_clear,
 )
 from features.platforms import make_platform
@@ -1679,147 +1679,6 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
-def _pr_head(platform, pr: dict) -> str:
-    try:
-        info = platform.get_pr_info(pr["repo"], pr["id"])
-    except Exception:
-        return ""
-    return info.get("head_sha", "") if isinstance(info, dict) else ""
-
-
-@task("fix_ci_failures",
-      preconditions=[status_is("in_review"),
-                     has_flag("_ci_failed_pending")],
-      timeout=FIX_TIMEOUT)
-def fix_ci_failures(ctx: TaskContext) -> TaskResult:
-    from features.tickets import MAX_CI_FIX_ATTEMPTS
-    from features.pr_ci import triage_and_fix_pr
-
-    ts = state.load_ticket(ctx.ticket_key or "") or {}
-    slug = ts.get("slug", "")
-    prs = ts.get("prs", [])
-    base_url = ctx.config.get("_base_url", "")
-    ticket_link = {"detail": f"{base_url}/tickets/{ctx.ticket_key}"}
-
-    try:
-        if not prs:
-            return TaskResult("failed", "no prs on ticket")
-
-        platform = make_platform(ctx.config)
-
-        for pr in prs:
-            wt = _ensure_pr_worktree(ctx.config, {"key": ctx.ticket_key}, ts, pr, base_url)
-            head_before = _pr_head(platform, pr)
-            outcome = triage_and_fix_pr(
-                platform, pr["repo"], pr["id"],
-                label=f"{ctx.ticket_key} {pr['repo']}#{pr['id']}",
-                worktree=wt,
-                attempts=ts.get("ci_fix_attempts", 0),
-                max_attempts=MAX_CI_FIX_ATTEMPTS,
-            )
-            kind = outcome["result"]
-            failed_names = outcome.get("failed_names", [])
-            pr_link = {**ticket_link, "pr": pr.get("url", "")}
-            meta = {"ticket": ctx.ticket_key, "repo": pr["repo"], "pr_id": pr["id"],
-                    "failed_checks": failed_names}
-
-            discarded = kind == "unrelated" and (not head_before
-                                                 or _pr_head(platform, pr) != head_before)
-            if failed_names:
-                def _triaged(current, names=failed_names,
-                             unrelated=kind == "unrelated" and not discarded):
-                    if not current:
-                        return None
-                    pr_key = f"{pr['repo']}/{pr['id']}"
-                    triaged = current.get("ci_triaged_checks") or {}
-                    seen = set(triaged.get(pr_key) or [])
-                    triaged[pr_key] = sorted(seen - set(names) if unrelated else seen | set(names))
-                    current["ci_triaged_checks"] = triaged
-                    return current
-                ts = state.update_ticket(ctx.ticket_key or "", _triaged) or ts
-
-            if discarded:
-                log.emit("ticket_checks_unrelated_discarded",
-                         f"CI failure for {slug or ctx.ticket_key} {pr['repo']}#{pr['id']} was "
-                         f"triaged as unrelated, but the PR head was unknown or moved during "
-                         f"triage; the next poll triages it again",
-                         links=pr_link, meta={**meta, "head_before": head_before})
-            elif kind == "unrelated":
-                def _memo(current, names=failed_names, head=head_before):
-                    if not current:
-                        return None
-                    unrelated = current.get("ci_unrelated_checks")
-                    if not isinstance(unrelated, dict):
-                        unrelated = {}
-                    pr_key = f"{pr['repo']}/{pr['id']}"
-                    seen = set(unrelated.get(pr_key) or [])
-                    unrelated[pr_key] = sorted(seen | set(names))
-                    current["ci_unrelated_checks"] = unrelated
-                    heads = current.get("ci_fix_heads") or {}
-                    heads[pr_key] = head
-                    current["ci_fix_heads"] = heads
-                    return current
-                updated = state.update_ticket(ctx.ticket_key or "", _memo)
-                if updated:
-                    ts = updated
-                log.emit("ticket_checks_unrelated",
-                         f"CI failure for {slug or ctx.ticket_key} not caused by our changes: "
-                         f"{outcome.get('reason','')[:100]}",
-                         links=pr_link, meta={**meta, "reason": outcome.get("reason", "")})
-            elif kind in ("fixed", "fix_failed", "haiku_empty", "haiku_parse_error",
-                          "worktree_missing"):
-                # Every outcome that burned a real fix cycle counts toward the
-                # cap — not just successful sends. Otherwise a CI failure the
-                # auto-fixer can't resolve (fix_failed/haiku_*) loops forever,
-                # never increments ci_fix_attempts, never trips
-                # MAX_CI_FIX_ATTEMPTS in _handle_ci_failure, and wedges the
-                # repo gate indefinitely. 'unrelated' and 'no_failing' don't
-                # count (nothing of ours was attempted).
-                head_after = _pr_head(platform, pr)
-
-                def _bump(current):
-                    if not current:
-                        return None
-                    current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
-                    if head_after:
-                        heads = current.get("ci_fix_heads") or {}
-                        heads[f"{pr['repo']}/{pr['id']}"] = head_after
-                        current["ci_fix_heads"] = heads
-                    current.pop("ci_passed", None)
-                    current.pop("checks_started_at", None)
-                    current.pop("ci_unrelated_checks", None)
-                    return current
-                updated = state.update_ticket(ctx.ticket_key or "", _bump) or {}
-                ts = updated
-                if kind == "fixed":
-                    log.emit("ticket_ci_fix_sent",
-                             f"Sent CI fix to {slug or ctx.ticket_key} (attempt "
-                             f"{updated.get('ci_fix_attempts', 0)}): {outcome.get('fix_hint','')[:80]}",
-                             links=pr_link,
-                             meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
-                elif kind == "worktree_missing":
-                    log.emit("ticket_ci_fix_skipped",
-                             f"Skipped CI fix for {slug or ctx.ticket_key}/{pr['repo']}: worktree missing "
-                             f"(attempt {updated.get('ci_fix_attempts', 0)}/{MAX_CI_FIX_ATTEMPTS})",
-                             links=ticket_link, meta={**meta, "reason": "worktree_missing"})
-                else:
-                    log.emit("ticket_ci_fix_attempt_failed",
-                             f"CI fix attempt for {slug or ctx.ticket_key} did not produce a fix "
-                             f"({kind}, attempt {updated.get('ci_fix_attempts', 0)}/{MAX_CI_FIX_ATTEMPTS})",
-                             links=pr_link, meta={**meta, "kind": kind})
-            # no_failing / capped / unrelated: don't count toward cap
-
-        return TaskResult("ok", artifacts={"ci_fix_attempts": ts.get("ci_fix_attempts", 0)})
-    finally:
-        if ctx.ticket_key:
-            def _clear(current):
-                if current is None:
-                    return None
-                current.pop("_ci_failed_pending", None)
-                return current
-            state.update_ticket(ctx.ticket_key, _clear)
-
-
 BACKFILL_TIMEOUT = 2400
 
 
@@ -2929,66 +2788,6 @@ def create_pr(ctx: TaskContext) -> TaskResult:
                           artifacts={"transitioned_to": "pr_failed"})
 
 
-CONFLICT_RESOLVE_TIMEOUT = 1200
-
-
-@task("resolve_conflicts",
-      preconditions=[status_is("in_review")],
-      timeout=CONFLICT_RESOLVE_TIMEOUT)
-def resolve_conflicts(ctx: TaskContext) -> TaskResult:
-    from features import tickets as tix
-    if not ctx.ticket_key:
-        return TaskResult("failed", "ticket_key missing")
-    ts = state.load_ticket(ctx.ticket_key)
-    if ts is None:
-        return TaskResult("failed", "ticket not found")
-    ticket = {"key": ctx.ticket_key, "summary": ts.get("summary", ""),
-              "description": ts.get("description", ""), "url": ts.get("url", "")}
-    base_url = ctx.config.get("_base_url", "")
-    prior_status = ts.get("status")
-    prior_attempts = ts.get("conflict_resolution_attempts", 0)
-    try:
-        updated = tix._resolve_conflicts(ctx.config, ticket, ts, base_url)
-    except Exception as e:
-        log.emit("resolve_conflicts_error",
-                 f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
-                 meta={"ticket": ctx.ticket_key})
-        return TaskResult("failed", f"{type(e).__name__}: {e}")
-    state.save_ticket(ctx.ticket_key, updated)
-    return TaskResult("ok", artifacts={
-        "transitioned_to": updated.get("status"),
-        "status_changed": updated.get("status") != prior_status,
-        "attempts": updated.get("conflict_resolution_attempts", 0),
-        "attempts_delta": updated.get("conflict_resolution_attempts", 0) - prior_attempts,
-    })
-
-
-@task("sync_pr_base",
-      preconditions=[status_is("in_review")],
-      timeout=CONFLICT_RESOLVE_TIMEOUT)
-def sync_pr_base(ctx: TaskContext) -> TaskResult:
-    from features import tickets as tix
-    if not ctx.ticket_key:
-        return TaskResult("failed", "ticket_key missing")
-    ts = state.load_ticket(ctx.ticket_key)
-    if ts is None:
-        return TaskResult("failed", "ticket not found")
-    ticket = {"key": ctx.ticket_key, "summary": ts.get("summary", ""),
-              "description": ts.get("description", ""), "url": ts.get("url", "")}
-    base_url = ctx.config.get("_base_url", "")
-    try:
-        updated, failures = tix._sync_pr_base(ctx.config, ticket, ts, base_url)
-    except Exception as e:
-        log.emit("sync_pr_base_error",
-                 f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
-                 meta={"ticket": ctx.ticket_key})
-        return TaskResult("failed", f"{type(e).__name__}: {e}")
-    state.save_ticket(ctx.ticket_key, updated)
-    if failures:
-        return TaskResult("failed", "; ".join(failures))
-    return TaskResult("ok")
-
-
 @task("apply_note_reset",
       timeout=30)
 def apply_note_reset(ctx: TaskContext) -> TaskResult:
@@ -3221,41 +3020,34 @@ def substantiate_reply(ctx: TaskContext) -> TaskResult:
     that walks every comment on every ticket. It runs here and writes the verdict
     back onto the comment when it is done.
     """
-    import features.tickets as ft
-
-    slug = ctx.payload.get("slug", "")
+    instance_key = ctx.instance_key
     repo = ctx.payload.get("repo", "")
+    pr_id = ctx.payload.get("pr_id")
     comment_id = ctx.payload.get("comment_id")
-    if not slug or not repo or comment_id is None:
-        return TaskResult("failed", "substantiate_reply needs slug, repo and comment_id")
+    if not repo or pr_id is None or comment_id is None:
+        return TaskResult("failed", "substantiate_reply needs repo, pr_id and comment_id")
+    pr_key = f"{repo}/{pr_id}"
 
-    path = ft._pr_comments_path(ctx.config, slug)
-    if not path.exists():
-        return TaskResult("skipped", "the comment file is gone")
-    try:
-        rows = json.loads(path.read_text())
-    except (OSError, ValueError) as e:
-        return TaskResult("failed", f"unreadable comment file: {type(e).__name__}: {e}")
-
-    entry = next((r for r in rows if str(r.get("id")) == str(comment_id)), None)
-    if not entry:
+    row = next((r for r in comments.get_comment_rows(instance_key, "pr", pr_key)
+                if str(r["comment_id"]) == str(comment_id)), None)
+    if not row:
         return TaskResult("skipped", f"comment {comment_id} is no longer tracked")
-    claim = (entry.get("suggested_reply") or "").strip()
+    claim = (row.get("suggested_reply") or "").strip()
     if not claim:
-        ft.record_defence_result(ctx.config, slug, comment_id,
-                                 {"verdict": defence.INCONCLUSIVE,
-                                  "reason": "no drafted reply to substantiate"})
+        comments.set_comment_defence(instance_key, "pr", pr_key, comment_id,
+                                     {"verdict": defence.INCONCLUSIVE,
+                                      "reason": "no drafted reply to substantiate"})
         return TaskResult("ok", artifacts={"verdict": defence.INCONCLUSIVE})
 
     ts = state.load_ticket(ctx.ticket_key or "") or {}
-    pr = next((p for p in ts.get("prs", []) if p.get("repo") == repo), None)
+    pr = next((p for p in ts.get("prs", []) if p.get("repo") == repo and p.get("id") == pr_id), None)
     wt = (_ensure_pr_worktree(ctx.config, {"key": ctx.ticket_key}, ts, pr,
                               ctx.config.get("_base_url", ""))
-          if pr else ticket_worktree_path(ctx.config, slug, repo))
+          if pr else ticket_worktree_path(ctx.config, ts.get("slug") or "", repo))
     if wt is None or not (wt / ".git").exists():
-        ft.record_defence_result(ctx.config, slug, comment_id,
-                                 {"verdict": defence.INCONCLUSIVE,
-                                  "reason": f"no worktree for {repo}"})
+        comments.set_comment_defence(instance_key, "pr", pr_key, comment_id,
+                                     {"verdict": defence.INCONCLUSIVE,
+                                      "reason": f"no worktree for {repo}"})
         return TaskResult("ok", artifacts={"verdict": defence.INCONCLUSIVE})
 
     try:
@@ -3268,7 +3060,7 @@ def substantiate_reply(ctx: TaskContext) -> TaskResult:
                  meta={"ticket": ctx.ticket_key, "repo": repo})
         result = {"verdict": defence.INCONCLUSIVE, "reason": f"{type(e).__name__}: {e}"[:200]}
 
-    ft.record_defence_result(ctx.config, slug, comment_id, result)
+    comments.set_comment_defence(instance_key, "pr", pr_key, comment_id, result)
     return TaskResult("ok", artifacts={"verdict": result.get("verdict", defence.INCONCLUSIVE)})
 
 

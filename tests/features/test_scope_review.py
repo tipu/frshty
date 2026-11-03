@@ -186,11 +186,8 @@ class TestTheCorrectionBudgetIsDurable:
 def _reconciled(config, ticket, ts, base_url, **kwargs):
     """Stand in for _check_in_review with nothing owed.
 
-    The merge gate refuses to merge when the reconciliation keys are absent,
-    so a no-op patch here would assert that the merge is blocked by the gate
-    rather than by the condition under test."""
-    ts[tickets.RECONCILE_READ_KEY] = True
-    ts[tickets.RECONCILE_OWED_KEY] = 0
+    The comment gate reads comment_state inside _merge, which these tests
+    patch, so nothing here stands for the comments."""
     return ts
 
 
@@ -199,10 +196,7 @@ class TestInReviewScopeGate:
         platform = MagicMock()
         platform.monitor_ci.return_value = ts
         with patch("features.tickets._scope_review_state", return_value=scope), \
-             patch("features.tickets._resolve_conflicts_pending", return_value=False), \
              patch("features.tickets._build_pr_info_map", return_value={}), \
-             patch("features.tickets._has_conflicting_pr", return_value=False), \
-             patch("features.tickets._pr_base_moved", return_value=False), \
              patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets._merge") as merge, \
              patch("features.tickets._check_in_review", side_effect=_reconciled), \

@@ -10,6 +10,7 @@ import pytest
 for _name in ("FRSHTY_BOARD_INSTANCE", "FRSHTY_ROOT", "FRSHTY_BOARD_FILE", "FRSHTY_DB"):
     os.environ.pop(_name, None)
 
+import core.comments as comments
 import core.db as db
 import core.state as state
 import core.log as log
@@ -26,7 +27,7 @@ def _no_live_no_reply_check():
 
     Every test that reaches the reply path would otherwise call the fast
     model. A test that exercises the check patches it itself."""
-    with patch("features.tickets._comment_needs_no_reply", return_value=False):
+    with patch("features.ticket_pr.comment_needs_no_reply", return_value=False):
         yield
 
 
@@ -360,6 +361,16 @@ def make_check(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def seed_reply_owed(instance_key, repo, pr_id, comment_id, body, **detail):
+    """A ticket PR comment that waits for a reply, as the own-PR engine
+    records it in comment_state."""
+    comments.import_comment(instance_key, "pr", f"{repo}/{pr_id}", {
+        "comment_id": comment_id, "state": "manual", "last_error": "needs a reply",
+        "body": body, "path": detail.get("path"), "line": detail.get("line"),
+        "diff_hunk": detail.get("diff_hunk"),
+        "suggested_reply": detail.get("suggested_reply", "")})
 
 
 def seed_state(tmp_path, module, data):
