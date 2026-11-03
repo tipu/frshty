@@ -549,6 +549,23 @@ class TestResolveConflicts:
             result = tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
         assert result["status"] == "in_review"
 
+    def test_closed_conflicting_pr_noop(self, tmp_path, fake_config):
+        fake_config["workspace"]["root"] = tmp_path
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING", "state": "CLOSED"}
+        ts = make_ticket_state(
+            status="in_review",
+            slug="PROJ-1-slug",
+            prs=[{"repo": "r", "id": 1, "url": "http://u"}],
+            conflict_resolution_attempts=2,
+        )
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
+        assert result["status"] == "in_review"
+        mock_platform.sync_remote_branch.assert_not_called()
+
     def test_max_attempts_transitions_to_failed(self, tmp_path, fake_config):
         fake_config["workspace"]["root"] = tmp_path
         mock_platform = MagicMock()
@@ -615,6 +632,13 @@ class TestHasConflictingPr:
         ts = {"prs": [{"repo": "r", "id": 1}, {"repo": "r", "id": 2}]}
         with patch("features.tickets.make_platform", return_value=mock_platform):
             assert tickets._has_conflicting_pr(fake_config, ts) is True
+
+    def test_closed_conflicting_pr_returns_false(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING", "state": "CLOSED"}
+        ts = {"prs": [{"repo": "r", "id": 1}]}
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            assert tickets._has_conflicting_pr(fake_config, ts) is False
 
     def test_all_clean_returns_false(self, fake_config):
         mock_platform = MagicMock()
@@ -683,6 +707,32 @@ class TestCheckEnqueuesResolveConflicts:
             tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
         eq.assert_any_call("inst", "PROJ-1", "resolve_conflicts")
         mock_platform.monitor_ci.assert_not_called()
+
+    def test_in_review_with_closed_conflicting_pr_parks_at_pr_failed(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        slug = "PROJ-1-do-the-thing"
+        state.save_ticket("PROJ-1", make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}],
+        ))
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING", "state": "CLOSED"}
+        mock_platform.monitor_ci.side_effect = lambda ticket, ts, base_url: ts
+
+        with patch("features.tickets._fetch_tickets",
+                   return_value=[make_ticket(status="In Progress")]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "r", "path": tmp_state / "r"}]), \
+             patch("features.tickets._resolve_status", return_value=None), \
+             patch("features.tickets._process_ticket_comments"), \
+             patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        assert ("inst", "PROJ-1", "resolve_conflicts") not in [c.args for c in eq.call_args_list]
+        assert state.load_ticket("PROJ-1")["status"] == "pr_failed"
 
     def test_in_review_with_pending_resolve_skips_ci(self, fake_config, tmp_state):
         import core.state as state

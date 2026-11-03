@@ -3330,7 +3330,7 @@ def _has_conflicting_pr(config: dict, ts: dict, pr_info_map=None) -> bool:
                     f"get_pr_info failed for {pr['repo']}#{pr['id']}: {e}",
                     meta={"repo": pr["repo"], "pr_id": pr["id"]})
                 continue
-        if info.get("mergeable") == "CONFLICTING":
+        if info.get("mergeable") == "CONFLICTING" and info.get("state", "OPEN") == "OPEN":
             return True
     return False
 
@@ -3356,7 +3356,7 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             info = pr_info_map.get((pr["repo"], pr["id"])) or {}
         else:
             info = platform.get_pr_info(pr["repo"], pr["id"])
-        if info.get("mergeable") != "CONFLICTING":
+        if info.get("mergeable") != "CONFLICTING" or info.get("state", "OPEN") != "OPEN":
             continue
 
         attempts = ts.get("conflict_resolution_attempts", 0)
