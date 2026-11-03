@@ -359,13 +359,12 @@ def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
             if fetched is None:
                 return "comment read failed", []
             pr_key = f"{pr['repo']}/{pr['id']}"
-            rows = {str(r["comment_id"]): r
-                    for r in comments.get_comment_rows(instance_key, "pr", pr_key)}
+            settled = comments.settled_comment_ids(
+                instance_key, "pr", pr_key, {str(c["id"]) for c in fetched})
             for c in fetched:
                 if c.get("resolved") or c.get("author_id") == user_id:
                     continue
-                row = rows.get(str(c["id"]))
-                if row is None or row["state"] in comments.OWED_STATES:
+                if str(c["id"]) not in settled:
                     owed_rows.append(_unresolved_comment_row(c))
     except Exception as e:
         return f"comment read failed: {type(e).__name__}", []
