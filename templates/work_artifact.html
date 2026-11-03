@@ -25,6 +25,8 @@ body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif
 #toggle { background: #1e1e2e; color: #d5d5dc; border: 1px solid #3a3a48; border-radius: 4px;
           padding: 5px 10px; font: inherit; cursor: pointer; }
 #toggle:hover { background: #2a2a3c; }
+#fav { background: none; border: 0; color: #777; font-size: 16px; line-height: 1; cursor: pointer; padding: 0; }
+#fav.on { color: #facc15; }
 #status { white-space: nowrap; }
 #panel { flex: none; width: 50%; display: none; padding: 6px; box-sizing: border-box; background: #0a0a0f;
          border-left: 1px solid #2a2a35; }
@@ -37,6 +39,7 @@ body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif
 <div id="top" class="bar">
   <a id="back" href="/tasks">← tasks</a>
   <a id="raw" target="_blank">open raw</a>
+  <button id="fav" type="button" title="add to favorites">☆</button>
   <span id="path"></span>
 </div>
 <div id="main">
@@ -130,10 +133,39 @@ toggle.addEventListener("click", async () => {
   term.focus();
 });
 
+const favBtn = document.getElementById("fav");
+let favTitle = "artifact #" + id, favId = "";
+
+function showFavorite(items) {
+  const hit = items.find((f) => String(f.artifact_id) === id && (f.peer || "") === peer);
+  favId = hit ? hit.id : "";
+  favBtn.classList.toggle("on", !!favId);
+  favBtn.textContent = favId ? "★" : "☆";
+  favBtn.title = favId ? "remove from favorites" : "add to favorites";
+}
+
+async function favoriteRequest(url, body) {
+  try {
+    const r = await fetch(url, body === undefined ? {} : {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+    showFavorite(d.items || []);
+  } catch (e) {
+    statusEl.textContent = "favorite error: " + (e.message || String(e));
+  }
+}
+
+favBtn.addEventListener("click", () => favId
+  ? favoriteRequest("/api/work/artifact_favorites/" + encodeURIComponent(favId) + "/delete", {})
+  : favoriteRequest("/api/work/artifact_favorites", { artifact_id: Number(id), peer, title: favTitle }));
+favoriteRequest("/api/work/artifact_favorites");
+
 fetch(apiBase + "/api/work/artifacts/" + id)
   .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
   .then((a) => {
     document.getElementById("path").textContent = a.path + (a.note ? " — " + a.note : "");
+    favTitle = "#" + a.work_item_id + " " + a.path.split("/").pop();
     document.title = baseTitle.replace(/Artifact$/, () => "#" + a.work_item_id + " - " + a.path.split("/").pop());
     const back = document.getElementById("back");
     back.href = "/tasks/" + a.work_item_id + (peer ? "?peer=" + encodeURIComponent(peer) : "");
