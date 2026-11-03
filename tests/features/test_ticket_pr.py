@@ -255,3 +255,47 @@ class TestSubstantiateReplyTask:
     def test_a_comment_no_longer_tracked_is_skipped(self, fake_config, inst):
         out = T.substantiate_reply(self._ctx(fake_config, inst))
         assert out.status == "skipped"
+
+
+class TestTicketCiBudget:
+    def _ci(self, tmp_path, seen, outcome, ticket_key="PROJ-1"):
+        platform = MagicMock()
+        platform.get_pr_checks.return_value = [{"state": "FAILED", "name": "lint"}]
+        worktree = tmp_path / "wt"
+        worktree.mkdir(exist_ok=True)
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="abc\n")), \
+             patch("features.pr_ci.triage_and_fix_pr", return_value=outcome) as triage, \
+             patch("features.own_prs.log"):
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, dict(PR), seen, "http://base",
+                              ticket_key=ticket_key)
+        return triage
+
+    def test_a_ticket_fix_run_that_produced_nothing_spends_the_budget(self, tmp_path):
+        seen: dict = {}
+        self._ci(tmp_path, seen, {"result": "fix_failed", "attempts": 0, "failed_names": ["lint"]})
+        assert seen["ci_fix_attempts"] == 1
+
+    def test_an_own_pr_fix_run_that_produced_nothing_keeps_its_budget(self, tmp_path):
+        seen: dict = {}
+        self._ci(tmp_path, seen, {"result": "fix_failed", "attempts": 0, "failed_names": ["lint"]},
+                 ticket_key="")
+        assert "ci_fix_attempts" not in seen
+
+    def test_the_head_a_fix_pushed_is_triaged_again_once_ci_had_time(self, tmp_path):
+        recent = {"ci_fix_sha": "abc", "ci_fix_at": "2999-01-01T00:00:00+00:00"}
+        assert self._ci(tmp_path, recent, {"result": "no_failing"}).call_count == 0
+        settled = {"ci_fix_sha": "abc", "ci_fix_at": "2000-01-01T00:00:00+00:00"}
+        assert self._ci(tmp_path, settled, {"result": "no_failing"}).call_count == 1
+
+    def test_a_capped_head_stays_skipped(self, tmp_path):
+        assert self._ci(tmp_path, {"ci_fix_sha": "abc"}, {"result": "no_failing"}).call_count == 0
+
+
+def test_the_same_branch_in_two_repositories_gets_two_worktrees(tmp_path):
+    config = {"_state_dir": tmp_path}
+    api = own_prs._worktree_path(config, {"repo": "api", "branch": "PROJ-1-x"})
+    web = own_prs._worktree_path(config, {"repo": "web", "branch": "PROJ-1-x"})
+    assert api != web
+    assert api.name == web.name == "PROJ-1-x"
