@@ -27,6 +27,8 @@ NEW_COMMENT_BASELINE_HOURS = 24
 COMMENT_DEBOUNCE_MINUTES = 30
 INACTIVE_PR_DAYS = 30
 MAX_CI_FIX_ATTEMPTS = 2
+CI_FIX_SETTLE_SECONDS = 1200
+TICKET_CI_SPENT = ("fix_failed", "haiku_empty", "haiku_parse_error", "worktree_missing")
 CLASSIFY_FAILED = "classification failed"
 NO_CHANGES = "no changes produced"
 NO_CHANGE_REASON = "the fix run read the comment and changed nothing"
@@ -98,7 +100,8 @@ def check(config: dict):
             _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=heads_cache,
                               ticket_key=ticket_key)
             _check_ci(config, platform, pr, seen, base_url, heads_cache=heads_cache,
-                      budget_used=_ticket_ci_attempts(pr_state, pr_key, ticket_key))
+                      budget_used=_ticket_ci_attempts(pr_state, pr_key, ticket_key),
+                      ticket_key=ticket_key)
         if not ticket_key:
             _check_stale(pr, seen, base_url)
 
@@ -1013,7 +1016,8 @@ def _invalidate_ticket_claims(config, ticket_key: str, reason: str) -> None:
             freshness.invalidate(ticket_key, claim, reason)
 
 
-def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_used=0):
+def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_used=0,
+              ticket_key=""):
     from features.pr_ci import (triage_and_fix_pr, ci_summary, FAILED_STATES,
                                 PENDING_STATES)
 
@@ -1037,6 +1041,7 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_use
         # on that window hands the fixer an unlimited budget against a check
         # that keeps failing.
         seen.pop("ci_fix_sha", None)
+        seen.pop("ci_fix_at", None)
         seen.pop("ci_unrelated_sha", None)
         if summary == "passing":
             seen.pop("ci_fix_attempts", None)
@@ -1056,7 +1061,11 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_use
                               cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
         # Don't re-triage the same commit we already acted on (either fixed or
         # classified as unrelated). New commits reset this.
-        if seen.get("ci_fix_sha") == head or seen.get("ci_unrelated_sha") == head:
+        fixed_at = seen.get("ci_fix_at")
+        if seen.get("ci_unrelated_sha") == head or (
+                seen.get("ci_fix_sha") == head
+                and not (fixed_at and _is_stale(fixed_at, datetime.now(timezone.utc),
+                                                CI_FIX_SETTLE_SECONDS))):
             return
 
         # A head frshty produced by merging the base carries no new work from
@@ -1089,6 +1098,7 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_use
 
         if attempts >= MAX_CI_FIX_ATTEMPTS:
             seen["ci_fix_sha"] = head
+            seen.pop("ci_fix_at", None)
 
         if kind == "capped":
             if not seen.get("ci_cap_emitted"):
@@ -1113,12 +1123,21 @@ def _check_ci(config, platform, pr, seen, base_url, heads_cache=None, budget_use
             new_head = subprocess.run(["git", "rev-parse", "HEAD"],
                                         cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
             seen["ci_fix_sha"] = new_head
+            seen["ci_fix_at"] = datetime.now(timezone.utc).isoformat()
             seen["ci_fix_attempts"] = outcome["attempts"] - budget_used
             seen.pop("ci_cap_emitted", None)
             log.emit("pr_ci_fix_sent",
                      f"{pr_ref}: Sent CI fix (attempt {outcome['attempts']}/{MAX_CI_FIX_ATTEMPTS}): {outcome.get('fix_hint','')[:80]}",
                      links=pr_link,
                      meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
+            return
+
+        if ticket_key and kind in TICKET_CI_SPENT:
+            seen["ci_fix_attempts"] = seen.get("ci_fix_attempts", 0) + 1
+            log.emit("ticket_ci_fix_attempt_failed",
+                     f"{ticket_key} · {pr_ref}: CI fix attempt produced no fix ({kind}, attempt "
+                     f"{attempts + 1}/{MAX_CI_FIX_ATTEMPTS})",
+                     links=pr_link, meta={**meta, "ticket": ticket_key, "kind": kind})
             return
 
         # haiku_empty, haiku_parse_error, fix_failed, no_failing, worktree_missing:
@@ -1164,6 +1183,7 @@ def _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=None, ti
 
     if result == "synced":
         seen.pop("ci_fix_sha", None)
+        seen.pop("ci_fix_at", None)
         seen.pop("ci_unrelated_sha", None)
         seen["base_merge_pending"] = True
         log.emit("pr_base_synced", f"{pr_ref}: merged {base_branch} into PR branch",
@@ -1193,7 +1213,9 @@ def _check_stale(pr, seen, base_url):
 
 
 def _worktree_path(config, pr) -> Path:
-    return config["_state_dir"] / "pr_worktrees" / pr["branch"].replace("/", "-")
+    """One worktree per repository and branch. A ticket opens the same branch
+    name in each repository it touches, so the branch alone names two PRs."""
+    return config["_state_dir"] / "pr_worktrees" / pr["repo"] / pr["branch"].replace("/", "-")
 
 
 def _ensure_worktree(config, pr, heads_cache=None) -> Path | None:
