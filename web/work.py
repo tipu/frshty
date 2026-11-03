@@ -156,6 +156,49 @@ def api_work_todo_delete(todo_id: str):
     return {"items": kept}
 
 
+FAVORITES_KV_KEY = "work_artifact_favorites"
+_favorites_lock = threading.Lock()
+
+
+def _favorite_items() -> list:
+    return state.load(FAVORITES_KV_KEY).get("items") or []
+
+
+@router.get("/api/work/artifact_favorites")
+def api_work_artifact_favorites():
+    return {"items": _favorite_items()}
+
+
+@router.post("/api/work/artifact_favorites")
+def api_work_artifact_favorite_add(body: dict):
+    artifact_id = body.get("artifact_id")
+    if not isinstance(artifact_id, int) or isinstance(artifact_id, bool) or artifact_id <= 0:
+        return JSONResponse({"error": "artifact_id must be a positive integer"}, status_code=400)
+    peer = body.get("peer") or ""
+    if not isinstance(peer, str):
+        return JSONResponse({"error": "peer must be a string"}, status_code=400)
+    title = str(body.get("title") or "").strip() or f"artifact #{artifact_id}"
+    with _favorites_lock:
+        items = _favorite_items()
+        if not any(it.get("artifact_id") == artifact_id and it.get("peer", "") == peer
+                   for it in items):
+            items.append({"id": uuid.uuid4().hex, "artifact_id": artifact_id,
+                          "peer": peer, "title": title})
+            state.save(FAVORITES_KV_KEY, {"items": items})
+    return {"items": items}
+
+
+@router.post("/api/work/artifact_favorites/{favorite_id}/delete")
+def api_work_artifact_favorite_delete(favorite_id: str):
+    with _favorites_lock:
+        items = _favorite_items()
+        kept = [it for it in items if it.get("id") != favorite_id]
+        if len(kept) == len(items):
+            return JSONResponse({"error": "no such favorite"}, status_code=404)
+        state.save(FAVORITES_KV_KEY, {"items": kept})
+    return {"items": kept}
+
+
 @router.get("/api/work/threads")
 def api_work_threads():
     return {"threads": work_store.threads(),
