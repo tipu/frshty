@@ -26,7 +26,7 @@ ALLOWED = {
     # tracks the seam as it absorbs calls from the files below. Every other
     # number may only go down.
     "core/git_util.py": 16,
-    "features/tickets.py": 30,
+    "features/tickets.py": 24,
     "web/tickets.py": 8,
     "features/defence.py": 8,
     "core/tasks/tickets.py": 5,
