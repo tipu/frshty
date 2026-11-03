@@ -85,6 +85,13 @@ class TestReconcileCommentsNow:
                 make_comment(id=11, author_id="me")]
         assert self._run(fake_config, live) == ("", [])
 
+    def test_a_deleted_row_the_platform_still_reports_is_owed(self, fake_config, inst):
+        comments.mark_comment_seen(inst, "pr", "api/7", "9", WRITTEN)
+        comments.mark_comment_deleted(inst, "pr", "api/7", "9")
+        hold, rows = self._run(fake_config, [make_comment(id=9, body="still open")])
+        assert hold == "1 comment(s) owed an answer"
+        assert rows[0]["snippet"] == "still open"
+
     def test_a_failed_read_holds(self, fake_config, inst):
         assert self._run(fake_config, None)[0] == "comment read failed"
 
