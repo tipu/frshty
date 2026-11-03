@@ -293,6 +293,14 @@
           <div class="ln-small" style="color:var(--ln-red);margin-top:6px" v-if="todoError">{{ todoError }}</div>
         </form>
       </div>
+      <div class="ln-card" v-if="favorites.length || favoritesError">
+        <div class="ln-card-head">Favorite artifacts</div>
+        <div class="ln-todo-row" v-for="f in favorites" :key="f.id">
+          <a class="ln-todo-text ln-link" :href="favoriteUrl(f)">{{ f.title }}<span class="ln-muted" v-if="f.peer"> · {{ f.peer }}</span></a>
+          <button class="ln-btn ln-btn-sm ln-btn-ghost" title="remove this favorite" @click="removeFavorite(f)">×</button>
+        </div>
+        <div class="ln-card-body ln-small" style="color:var(--ln-red)" v-if="favoritesError">{{ favoritesError }}</div>
+      </div>
       <div class="ln-card">
         <div class="ln-card-head">
           Active threads
@@ -351,7 +359,7 @@ frshtyApp({
       intakeTray: PasteImages.tray(), fupTray: {},
       intakeAgent: localStorage.getItem("workAgent") || "claude",
       diskReports: {},
-      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, explainText: {}, explainBusy: {}, linkmap: null, threads: [], todos: [], todoText: "", todoError: "",
+      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, explainText: {}, explainBusy: {}, linkmap: null, threads: [], todos: [], todoText: "", todoError: "", favorites: [], favoritesError: "",
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
@@ -671,6 +679,30 @@ frshtyApp({
     },
     async removeTodo(t) {
       await this.todoPost("/api/work/todo/" + encodeURIComponent(t.id) + "/delete");
+    },
+    async loadFavorites() {
+      try {
+        const r = await fetch("/api/work/artifact_favorites");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        this.favorites = (await r.json()).items || [];
+        this.favoritesError = "";
+      } catch (e) {
+        this.favoritesError = "Could not load favorite artifacts: " + e.message;
+      }
+    },
+    favoriteUrl(f) {
+      return "/artifacts/" + encodeURIComponent(f.artifact_id) + (f.peer ? "?peer=" + encodeURIComponent(f.peer) : "");
+    },
+    async removeFavorite(f) {
+      try {
+        const r = await fetch("/api/work/artifact_favorites/" + encodeURIComponent(f.id) + "/delete", { method: "POST" });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        this.favorites = d.items || [];
+        this.favoritesError = "";
+      } catch (e) {
+        this.favoritesError = e.message;
+      }
     },
     async loadThreads() {
       const perSource = await Promise.all(this.hosts().map(async key => {
@@ -1000,7 +1032,7 @@ frshtyApp({
     const b = document.getElementById("boot-error");
     if (b) b.remove();
     Promise.all([this.loadConfig(), this.loadPeers()]).then(() => {
-      this.loadLinkmap(); this.refresh(); this.loadThreads(); this.loadTodos(); this.loadDisk();
+      this.loadLinkmap(); this.refresh(); this.loadThreads(); this.loadTodos(); this.loadFavorites(); this.loadDisk();
       setInterval(() => this.loadDisk(), 600000);
       setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
     });

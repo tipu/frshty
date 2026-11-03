@@ -40,3 +40,45 @@ class TestTodoUi:
         assert board.index(">Todo</div>") < board.index("Active threads")
         assert "this.loadTodos()" in board
         assert "removeTodo(t)" in board
+
+
+class TestArtifactFavoritesApi:
+    def test_add_dedupe_and_remove(self, tmp_state):
+        client = _client()
+        assert client.get("/api/work/artifact_favorites").json() == {"items": []}
+        first = client.post("/api/work/artifact_favorites",
+                            json={"artifact_id": 7, "peer": "peer-b", "title": "#3 report.html"}).json()["items"]
+        assert [(f["artifact_id"], f["peer"], f["title"]) for f in first] == [(7, "peer-b", "#3 report.html")]
+        again = client.post("/api/work/artifact_favorites",
+                            json={"artifact_id": 7, "peer": "peer-b", "title": "x"}).json()["items"]
+        assert len(again) == 1
+        both = client.post("/api/work/artifact_favorites", json={"artifact_id": 7}).json()["items"]
+        assert [(f["artifact_id"], f["peer"], f["title"]) for f in both] == [
+            (7, "peer-b", "#3 report.html"), (7, "", "artifact #7")]
+        r = client.post(f"/api/work/artifact_favorites/{both[0]['id']}/delete")
+        assert r.status_code == 200
+        assert [f["peer"] for f in client.get("/api/work/artifact_favorites").json()["items"]] == [""]
+
+    def test_bad_artifact_id_is_refused(self, tmp_state):
+        client = _client()
+        for bad in ("7", 0, True, None):
+            assert client.post("/api/work/artifact_favorites", json={"artifact_id": bad}).status_code == 400
+        assert client.post("/api/work/artifact_favorites",
+                           json={"artifact_id": 1, "peer": 5}).status_code == 400
+        assert client.get("/api/work/artifact_favorites").json() == {"items": []}
+
+    def test_unknown_id_is_a_404(self, tmp_state):
+        assert _client().post("/api/work/artifact_favorites/nope/delete").status_code == 404
+
+
+class TestArtifactFavoritesUi:
+    def test_favorites_card_sits_below_todo(self):
+        board = pathlib.Path("templates/work.html").read_text()
+        assert board.index(">Todo</div>") < board.index(">Favorite artifacts</div>") < board.index("Active threads")
+        assert "this.loadFavorites()" in board
+        assert '"?peer=" + encodeURIComponent(f.peer)' in board
+
+    def test_artifact_page_has_a_favorite_button(self):
+        page = pathlib.Path("templates/work_artifact.html").read_text()
+        assert 'id="fav"' in page
+        assert "/api/work/artifact_favorites" in page
