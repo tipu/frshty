@@ -118,7 +118,7 @@ class TestAutoMergeIsNotFedStaleGreen:
         assert "ci_passed" not in out
         merge.assert_not_called()
 
-    def test_a_failed_check_run_blocks_the_merge(self, fake_config):
+    def test_a_failed_check_run_blocks_the_merge(self, fake_config, tmp_state):
         fake_config["pr"]["auto_merge"] = True
         ts = make_ticket_state(status="in_review", ci_passed=True)
         _, merge = self._handle(
