@@ -235,6 +235,36 @@ class TestCheckComments:
         assert mock_comments.mark_comment_deferred.call_args.args[3] == "21"
         assert seen["issue_comments_baselined"] is True
 
+    def test_triage_reads_the_whole_bot_review_and_its_severity_rule(self, tmp_path):
+        platform = MagicMock()
+        body = ("**Claude finished the task** —— [View job](https://example.invalid/run)\n"
+                + "- [x] Gather context\n" * 40
+                + "**Issue:** [High] A follow-up turn gets the output question instead of a plan")
+        review = make_comment(id=22, author_id="github-actions", author_is_bot=True, body=body,
+                              created_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+                              comment_kind="issue_comment", resolvable=False, path=None)
+        platform.get_pr_comments.return_value = [review]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced",
+                   return_value='{"results": [{"id": 0, "actionable": true, "reason": "High open"}]}') as mock_triage, \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = True
+            mock_comments.answered_comment_ids.return_value = set()
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [review], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base",
+                                    seen={"issue_comments_baselined": True})
+
+        prompt = mock_triage.call_args.args[0]
+        assert "[High] A follow-up turn gets the output question" in prompt
+        assert own_prs.AUTOMATED_REVIEW_TRIAGE_RULE in prompt
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "22"
+
     def test_each_comment_kind_keeps_its_own_baseline_flag(self, tmp_path):
         platform = MagicMock()
         body = make_comment(id=30, author_id="reviewer1", comment_kind="review_body",
@@ -1236,6 +1266,7 @@ class TestFixCommentsBatch:
         mock_claude.assert_called_once()
         assert "Fix this" in mock_claude.call_args[0][0]
         assert "Fix that" in mock_claude.call_args[0][0]
+        assert own_prs.AUTOMATED_REVIEW_FIX_RULE in mock_claude.call_args[0][0]
         mock_commit.assert_called_once()
         assert "2 review comments" in mock_commit.call_args[0][1]
         assert "Fix this" in mock_commit.call_args.kwargs["context"]

@@ -70,12 +70,15 @@ class TestOwnPrs:
         return keep, seen, log
 
     def test_superseded_and_capped_reviews_are_dropped_and_baselined(self):
-        live = [_review(10), _review(11), _review(12), _human(13)]
+        answered = [_review(10 + i) for i in range(own_prs.MAX_AUTOMATED_REVIEW_FIX_RUNS)]
+        newest = _review(10 + len(answered))
+        live = [*answered, newest, _human(99)]
 
-        keep, seen, log = self._drop(live, {"10", "11"})
+        keep, seen, log = self._drop(live, {str(c["id"]) for c in answered})
 
-        assert [c["id"] for c in keep] == [13]
-        assert sorted(call.args[3] for call in seen.call_args_list) == ["10", "11", "12"]
+        assert [c["id"] for c in keep] == [99]
+        assert sorted(call.args[3] for call in seen.call_args_list) == sorted(
+            str(c["id"]) for c in [*answered, newest])
         assert log.emit.call_args.args[0] == "pr_automated_review_skipped"
 
     def test_below_the_cap_only_the_superseded_review_is_dropped(self):
