@@ -32,6 +32,14 @@ TICKET_CI_SPENT = ("fix_failed", "haiku_empty", "haiku_parse_error", "worktree_m
 CLASSIFY_FAILED = "classification failed"
 NO_CHANGES = "no changes produced"
 NO_CHANGE_REASON = "the fix run read the comment and changed nothing"
+AUTOMATED_REVIEW_TRIAGE_RULE = (
+    "A bot's review of the whole PR that lists any Critical, High or Medium issue as still "
+    "open asks for concrete code changes, so choose actionable=true, even when the review "
+    "opens with a progress checklist or a summary. A bot review that lists only Low issues, "
+    "or no issues, or only reports progress, is actionable=false.")
+AUTOMATED_REVIEW_FIX_RULE = (
+    "When a review comment is a bot's review of the whole PR that rates its issues, fix every "
+    "Critical, High and Medium issue it lists as still open. Leave its Low issues alone.")
 TRIAGE_SCHEMA = strict_object({
     "results": {"type": "array", "items": strict_object({
         "id": {"type": "integer"},
@@ -497,7 +505,7 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
     comment_list = "\n\n".join(
         f"[{i}] {c.get('path', '')}:{c.get('line', '')}\n"
         f"CODE:\n{(c.get('diff_hunk') or '(no hunk)')[:600]}\n"
-        f"COMMENT: {c['body'][:300]}"
+        f"COMMENT: {c['body']}"
         for i, c in enumerate(all_to_process)
     )
     batch_prompt = (
@@ -506,7 +514,8 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
         "grounded in the code, e.g. 'Move to global.', 'Sanitize this', 'Use X instead', "
         "'Add a test for Y', 'Rename to Z', 'This should be debug'. actionable=false ONLY for "
         "genuine open questions, opinions, or discussion with no concrete change to make. "
-        "When a comment implies a specific change to the code shown, choose true.\n\n"
+        "When a comment implies a specific change to the code shown, choose true. "
+        f"{AUTOMATED_REVIEW_TRIAGE_RULE}\n\n"
         f"{comment_list}\n\n"
         'Reply with JSON: {"results": [{"id": 0, "actionable": true, "reason": "brief reason"}, ...]}'
     )
@@ -942,6 +951,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             context = (
                 f"The following {len(pending)} review comments were left on this PR. "
                 f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above.\n\n"
+                + AUTOMATED_REVIEW_FIX_RULE + "\n\n"
                 + FILE_TOOLS_KEEP_GREEN_RULE + "\n\n"
                 + COMMIT_SUBJECT_RULE
             )
