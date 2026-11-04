@@ -64,7 +64,7 @@ class TestCycles:
 
     def test_budgets(self):
         assert (SCOPE_FIX.budget, BASE_SYNC.budget, PR_AUTOFIX.budget,
-                AUTOMATED_REVIEW_FIX.budget, TEST_FIX.budget) == (2, 2, 3, 2, 3)
+                AUTOMATED_REVIEW_FIX.budget, TEST_FIX.budget) == (2, 2, 3, 3, 3)
 
     def test_module_constants_read_the_graph(self):
         assert MAX_SCOPE_FIX_ATTEMPTS == SCOPE_FIX.budget
