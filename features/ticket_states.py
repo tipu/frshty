@@ -99,7 +99,7 @@ class TicketState(TypedDict, total=False):
     - PR markers: prs, pr_scheduled_at, pr_attempts, pr_failed_reason
     - conflict markers: conflict_resolution_attempts, last_conflict_error
     - CI markers: ci_fix_attempts, ci_fix_heads, ci_passed, checks_started_at,
-      _ci_timeout_state, ci_held_unrelated
+      checks_heads, _ci_timeout_state, ci_held_unrelated
     - scope review markers: scope_review
     - misc: llm_sessions
     """
@@ -135,6 +135,7 @@ class TicketState(TypedDict, total=False):
     ci_fix_heads: dict
     ci_passed: bool
     checks_started_at: str
+    checks_heads: dict
     _ci_timeout_state: dict
     ci_held_unrelated: bool
     scope_review: dict
@@ -437,6 +438,23 @@ def _handle_pr_ready_ticket(
     return ts, False
 
 
+def _restart_checks_window_on_new_head(ts: dict, pr_info_map: dict) -> None:
+    """A CI run belongs to a head, so the checks window restarts when a head
+    moves. Only a green result used to end the window, so a window opened on a
+    head that never went green kept aging across every later push. An unread
+    head says nothing about a move, so it keeps its stored value."""
+    stored = ts.get("checks_heads") or {}
+    heads = dict(stored)
+    for pr in ts.get("prs", []):
+        sha = (pr_info_map.get((pr["repo"], pr["id"])) or {}).get("head_sha")
+        if sha:
+            heads[f"{pr['repo']}/{pr['id']}"] = sha
+    if heads != stored:
+        ts["checks_heads"] = heads
+        ts.pop("checks_started_at", None)
+        ts.pop("_ci_timeout_state", None)
+
+
 def _handle_in_review_ticket(
     config: dict,
     ticket: dict,
@@ -467,6 +485,7 @@ def _handle_in_review_ticket(
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
         ts.pop("ci_held_unrelated", None)
+        _restart_checks_window_on_new_head(ts, pr_info_map)
         result = platform.monitor_ci(ticket, ts, base_url)
         if result.get("_ci_failed"):
             ts.pop("ci_passed", None)
