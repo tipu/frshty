@@ -317,6 +317,9 @@ class BitbucketPlatform(_CIMonitorMixin):
     def self_id(self) -> str:
         return self.user_account_id
 
+    def remember_repo(self, short_name: str, full_name: str) -> None:
+        pass
+
     def _auth(self):
         return (self.user, self.token)
 
@@ -741,6 +744,9 @@ class GitHubPlatform(_CIMonitorMixin):
         full = f"{org}/{short_name}"
         self._repo_cache[short_name] = full
         return full
+
+    def remember_repo(self, short_name: str, full_name: str) -> None:
+        self._repo_cache[short_name] = full_name
 
     def list_my_open_prs(self) -> list[dict]:
         prs = []

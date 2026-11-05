@@ -75,7 +75,7 @@ def populate_repo_cache(platform, state_dir: Path, repo: str) -> None:
         pr_url = comments[0].get("pr_url", "")
         m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/", pr_url)
         if m:
-            platform._repo_cache[repo] = m.group(1)
+            platform.remember_repo(repo, m.group(1))
             return
 
 

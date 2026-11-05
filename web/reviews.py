@@ -2,8 +2,10 @@ import json
 import multiprocessing
 import re
 import shlex
+import shutil
 import subprocess
 import threading
+from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -28,15 +30,25 @@ from web.state import _config, active_config
 router = APIRouter()
 
 
-def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
+def _run_review(config_path: str, state_dir: Path, job_key: str, full_repo: str, pr_id: int, url: str):
     from web.state import ensure_path
     ensure_path()
-    review_config = cfg.load_config(config_path)
-    state.init(review_config["_state_dir"])
-    log.init(review_config["_state_dir"], review_config["job"]["key"])
+    repo_short = full_repo.split("/")[-1]
+    try:
+        state.init(state_dir)
+        log.init(state_dir, job_key)
+        _review_submitted_pr(cfg.load_config(config_path), full_repo, pr_id, url)
+    except Exception as e:
+        log.emit("cycle_error", f"Manual review crashed for {full_repo} PR #{pr_id}: {type(e).__name__}: {e}",
+            links={"pr": url}, meta={"repo": repo_short, "pr_id": pr_id})
+    finally:
+        shutil.rmtree(state_dir / "reviews" / repo_short / f"pending-{pr_id}", ignore_errors=True)
+
+
+def _review_submitted_pr(review_config: dict, full_repo: str, pr_id: int, url: str):
     platform = make_platform(review_config)
     repo_short = full_repo.split("/")[-1]
-    platform._repo_cache[repo_short] = full_repo
+    platform.remember_repo(repo_short, full_repo)
     branch = platform.get_pr_branch(repo_short, pr_id) or f"pr-{pr_id}"
     pr = {
         "id": pr_id,
@@ -54,10 +66,7 @@ def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
     log.emit("review_started", f"Manual review: {full_repo} PR #{pr_id}",
         links={"pr": url, "detail": f"{base_url}/reviews/{pr['repo']}/{pr_id}"},
         meta={"repo": pr["repo"], "pr_id": pr_id})
-    pending_dir = review_config["_state_dir"] / "reviews" / pr["repo"] / f"pending-{pr_id}"
     result = reviewer.review_pr(review_config, platform, pr, reuse_posted=False)
-    import shutil
-    shutil.rmtree(pending_dir, ignore_errors=True)
     if result:
         review_state = state.load("reviews")
         review_state[f"{pr['repo']}/{pr_id}"] = {"reviewed": True, "branch": pr["branch"], "last_updated": pr.get("updated_on")}
@@ -89,7 +98,9 @@ def api_submit_review(body: dict):
     (pending_dir / "queued_comments.json").write_text(json.dumps([{"pr_id": pr_id, "repo": repo_short, "pr_url": url, "status": "pending"}]))
     (pending_dir / "review.json").write_text(json.dumps({"verdict": "", "status": "reviewing"}))
     multiprocessing.Process(
-        target=_run_review, args=(str(_config["_config_path"]), full_repo, pr_id, url), daemon=True
+        target=_run_review,
+        args=(str(_config["_config_path"]), _config["_state_dir"], _config["job"]["key"], full_repo, pr_id, url),
+        daemon=True,
     ).start()
     return {"status": "started", "repo": full_repo, "pr_id": pr_id}
 
@@ -286,7 +297,6 @@ def api_reviews_list():
     else:
         my_id = _config.get("github", {}).get("user", "") or "@me"
     from concurrent.futures import ThreadPoolExecutor
-    import shutil
 
     def check_open(r):
         if not r["pr_id"]:
