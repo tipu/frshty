@@ -387,6 +387,9 @@ class BitbucketPlatform(_CIMonitorMixin):
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
+                log.emit("bitbucket_comments_read_failed",
+                         f"{repo}#{pr_id}: Bitbucket answered {resp.status_code}: {resp.text[:300]}",
+                         meta={"repo": repo, "pr_id": pr_id, "status_code": resp.status_code})
                 return None
             out = [
                 {
@@ -424,6 +427,9 @@ class BitbucketPlatform(_CIMonitorMixin):
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
+                log.emit("bitbucket_checks_read_failed",
+                         f"{repo}#{pr_id}: Bitbucket answered {resp.status_code}: {resp.text[:300]}",
+                         meta={"repo": repo, "pr_id": pr_id, "status_code": resp.status_code})
                 return None
             return [
                 {
@@ -727,10 +733,14 @@ class GitHubPlatform(_CIMonitorMixin):
             args += [flag, f"{k}={v}"]
         result = self._run_gh(args)
         if result.returncode != 0:
+            log.emit("gh_graphql_failed",
+                     f"gh graphql exited {result.returncode}: {(result.stderr or '').strip()[:300]}",
+                     meta={**variables, "returncode": result.returncode})
             return None
         try:
             return json.loads(result.stdout)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            log.emit("gh_graphql_failed", f"gh graphql returned invalid JSON: {e}", meta=variables)
             return None
 
     _repo_cache: dict[str, str] = {}
@@ -1030,7 +1040,9 @@ class GitHubPlatform(_CIMonitorMixin):
         if out:
             try:
                 data = json.loads(out)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                log.emit("gh_checks_read_failed", f"{repo}#{pr_id}: gh pr checks returned invalid JSON: {e}",
+                         meta={"repo": repo, "pr_id": pr_id})
                 return None
             return [
                 {"name": c["name"], "state": c["state"], "url": c.get("link", "")}
@@ -1040,6 +1052,9 @@ class GitHubPlatform(_CIMonitorMixin):
             return []
         if result.returncode == 0:
             return []
+        log.emit("gh_checks_read_failed",
+                 f"{repo}#{pr_id}: gh pr checks exited {result.returncode}: {(result.stderr or '').strip()[:300]}",
+                 meta={"repo": repo, "pr_id": pr_id, "returncode": result.returncode})
         return None
 
     def get_failed_logs(self, repo: str, pr_id: int) -> str:
