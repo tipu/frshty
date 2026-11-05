@@ -196,3 +196,21 @@ def test_refresh_invoice_descriptionsNotConfigured_refuses(fresh_db, tmp_path):
         with pytest.raises(ValueError, match="not configured"):
             asyncio.run(billing.refresh_invoice(config, "inv1"))
     replace.assert_not_awaited()
+
+
+def test_refresh_invoice_noWorkDays_refusesAndLeavesBillcomUntouched(fresh_db, tmp_path):
+    config = _config(tmp_path)
+    from features import billing
+    import core.state as state
+
+    state.save("billing_entries", {
+        "2026-03-02": {"date": "2026-03-02", "type": "vacation", "hours": 0},
+        "2026-03-03": {"date": "2026-03-03", "type": "vacation", "hours": 0},
+    })
+    replace = AsyncMock()
+    with patch("features.billing.billcom.has_credentials", return_value=True), \
+         patch("features.billing.billcom.get_invoice", AsyncMock(return_value=_stale_invoice())), \
+         patch("features.billing.billcom.replace_invoice", replace):
+        with pytest.raises(ValueError, match="no work days"):
+            asyncio.run(billing.refresh_invoice(config, "inv1"))
+    replace.assert_not_awaited()

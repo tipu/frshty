@@ -247,6 +247,8 @@ def _build_line_items(config: dict, body: dict, work_entries: list[dict], strict
     jira_ready = bool(config.get("features", {}).get("timesheet") and config.get("jira", {}).get("base_url"))
     if strict and not (b.get("include_daily_descriptions") and jira_ready):
         raise ValueError("invoice descriptions from Jira are not configured")
+    if strict and not work_entries:
+        raise ValueError(f"no work days in {body['start']}..{body['end']}")
 
     if b.get("include_daily_descriptions") and work_entries:
         worklogs_by_date = {}
