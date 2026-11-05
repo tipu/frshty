@@ -239,24 +239,32 @@ def _totals(config: dict, work_entries: list[dict], start: str = "") -> tuple[fl
     return hours, amount
 
 
-def _build_line_items(config: dict, body: dict, work_entries: list[dict]) -> list[dict]:
+def _build_line_items(config: dict, body: dict, work_entries: list[dict], strict: bool = False) -> list[dict]:
     b = _billing_cfg(config)
     rate = b.get("rate", 0)
     hours = sum(_cap_day_hours(e.get("hours", 8)) for e in work_entries)
     items = []
+    jira_ready = bool(config.get("features", {}).get("timesheet") and config.get("jira", {}).get("base_url"))
+    if strict and not (b.get("include_daily_descriptions") and jira_ready):
+        raise ValueError("invoice descriptions from Jira are not configured")
 
     if b.get("include_daily_descriptions") and work_entries:
         worklogs_by_date = {}
-        if config.get("features", {}).get("timesheet") and config.get("jira", {}).get("base_url"):
+        if jira_ready:
             try:
-                wl = _fetch_worklogs(config, date.fromisoformat(body["start"]), date.fromisoformat(body["end"]))
+                wl = _fetch_worklogs(config, date.fromisoformat(body["start"]), date.fromisoformat(body["end"]),
+                                     strict=strict)
                 for d_str, logs in wl.items():
                     worklogs_by_date[d_str] = logs
             except Exception as e:
+                if strict:
+                    raise ValueError(f"Jira worklog fetch failed: {e}") from e
                 log.emit("invoice_description_fallback", f"worklog fetch failed: {e}",
                     meta={"err": str(e)[:200]})
 
         any_wl = any(worklogs_by_date.get(e["date"]) for e in work_entries)
+        if strict and not any_wl:
+            raise ValueError(f"no Jira worklogs found for {body['start']}..{body['end']}")
         if not any_wl:
             log.emit("invoice_description_fallback", "no worklogs; using date-only descriptions",
                 meta={"start": body["start"], "end": body["end"]})
@@ -299,6 +307,13 @@ def _build_line_items(config: dict, body: dict, work_entries: list[dict]) -> lis
     return items
 
 
+def _line_item_totals(config: dict, items: list[dict]) -> tuple[float, float]:
+    extras = {label.replace("_", " ") for label in (_billing_cfg(config).get("extras") or {})}
+    hours = sum(i["quantity"] for i in items if i["description"] not in extras)
+    amount = sum(i["quantity"] * i["price"] for i in items)
+    return hours, amount
+
+
 def _overlapping(invoices: list[dict], start: str, end: str) -> dict | None:
     for inv in invoices:
         i_start, i_end = inv.get("start"), inv.get("end")
@@ -332,11 +347,11 @@ async def create_invoice(config: dict, body: dict, source: str = "manual") -> di
         raise OverlapError(conflict)
 
     work_entries = _work_days_in(start, end)
-    hours, amount = _totals(config, work_entries, start)
     number = body.get("number") or (await next_invoice_number(config))["number"]
     due_date = body.get("date") or end
 
     line_items = _build_line_items(config, {"start": start, "end": end}, work_entries)
+    hours, amount = _line_item_totals(config, line_items)
 
     result = await billcom.create_invoice(
         customer_id=customer_id,
@@ -411,8 +426,8 @@ async def refresh_invoice(config: dict, invoice_id: str) -> dict:
         raise ValueError(f"invoice {norm['number']} has no billing period")
 
     work_entries = _work_days_in(start, end)
-    hours, amount = _totals(config, work_entries, start)
-    line_items = _build_line_items(config, {"start": start, "end": end}, work_entries)
+    line_items = _build_line_items(config, {"start": start, "end": end}, work_entries, strict=True)
+    hours, amount = _line_item_totals(config, line_items)
 
     await billcom.replace_invoice(
         invoice_id=invoice_id,

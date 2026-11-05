@@ -142,3 +142,57 @@ def test_refresh_endpoint_paidInvoice_returns400(fresh_db, tmp_path):
         r = client.post("/api/billing/invoices/inv1/refresh")
     assert r.status_code == 400, r.text
     assert "payments" in r.json()["error"]
+
+
+@pytest.mark.parametrize("fetch", [
+    {"side_effect": RuntimeError("Jira search failed: 401")},
+    {"return_value": {}},
+])
+def test_refresh_invoice_jiraUnavailable_refusesAndLeavesBillcomUntouched(fresh_db, tmp_path, fetch):
+    config = _config(tmp_path)
+    from features import billing
+    import core.state as state
+
+    replace = AsyncMock()
+    with patch("features.billing.billcom.has_credentials", return_value=True), \
+         patch("features.billing.billcom.get_invoice", AsyncMock(return_value=_stale_invoice())), \
+         patch("features.billing.billcom.replace_invoice", replace), \
+         patch("features.billing._fetch_worklogs", **fetch):
+        with pytest.raises(ValueError, match="Jira"):
+            asyncio.run(billing.refresh_invoice(config, "inv1"))
+    replace.assert_not_awaited()
+    assert "inv1" not in state.load("billing_invoices")
+
+
+def test_refresh_invoice_partialJiraDay_totalsMatchLineItems(fresh_db, tmp_path):
+    config = _config(tmp_path)
+    from features import billing
+
+    worklogs = {
+        "2026-03-02": [{"ticket": "PR-1", "summary": "Old work", "hours": 8}],
+        "2026-03-03": [{"ticket": "PR-2", "summary": "Short day", "hours": 2}],
+    }
+    replace = AsyncMock(return_value={"id": "inv1"})
+    with patch("features.billing.billcom.has_credentials", return_value=True), \
+         patch("features.billing.billcom.get_invoice", AsyncMock(return_value=_stale_invoice())), \
+         patch("features.billing.billcom.replace_invoice", replace), \
+         patch("features.billing._fetch_worklogs", return_value=worklogs):
+        rec = asyncio.run(billing.refresh_invoice(config, "inv1"))
+
+    items = replace.await_args.kwargs["line_items"]
+    assert rec["hours"] == 10
+    assert rec["amount"] == sum(i["quantity"] * i["price"] for i in items) == 10 * 90 + 20
+
+
+def test_refresh_invoice_descriptionsNotConfigured_refuses(fresh_db, tmp_path):
+    config = _config(tmp_path)
+    config["billing"]["include_daily_descriptions"] = False
+    from features import billing
+
+    replace = AsyncMock()
+    with patch("features.billing.billcom.has_credentials", return_value=True), \
+         patch("features.billing.billcom.get_invoice", AsyncMock(return_value=_stale_invoice())), \
+         patch("features.billing.billcom.replace_invoice", replace):
+        with pytest.raises(ValueError, match="not configured"):
+            asyncio.run(billing.refresh_invoice(config, "inv1"))
+    replace.assert_not_awaited()
