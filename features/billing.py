@@ -387,6 +387,70 @@ async def create_invoice(config: dict, body: dict, source: str = "manual") -> di
     return inv_record
 
 
+async def refresh_invoice(config: dict, invoice_id: str) -> dict:
+    b = _billing_cfg(config)
+    customer_id = b.get("billcom_customer_id", "")
+    if not customer_id:
+        raise ValueError("billing not configured: missing billcom_customer_id")
+    if not billcom.has_credentials():
+        raise ValueError("billcom not configured")
+
+    inv = await billcom.get_invoice(invoice_id)
+    norm = _normalize_remote_invoice(inv, customer_id)
+    if not norm:
+        raise ValueError("invoice does not belong to this client")
+    if inv.get("archived") or inv.get("recordStatus") == "INACTIVE":
+        raise ValueError(f"invoice {norm['number']} is archived; it cannot be refreshed")
+    if inv.get("status") in ("PAID_IN_FULL", "PARTIAL_PAYMENT") or inv.get("payments"):
+        raise ValueError(f"invoice {norm['number']} has payments; it cannot be refreshed")
+
+    local = _local_invoices().get(invoice_id) or {}
+    start = local.get("start") or norm["start"]
+    end = local.get("end") or norm["end"]
+    if not start or not end:
+        raise ValueError(f"invoice {norm['number']} has no billing period")
+
+    work_entries = _work_days_in(start, end)
+    hours, amount = _totals(config, work_entries, start)
+    line_items = _build_line_items(config, {"start": start, "end": end}, work_entries)
+
+    await billcom.replace_invoice(
+        invoice_id=invoice_id,
+        customer_id=customer_id,
+        invoice_number=norm["number"],
+        invoice_date=inv.get("invoiceDate") or norm["date"],
+        due_date=inv.get("dueDate") or end,
+        line_items=line_items,
+    )
+
+    inv_record = {
+        "id": invoice_id,
+        "number": norm["number"],
+        "date": norm["date"],
+        "start": start,
+        "end": end,
+        "hours": hours,
+        "amount": amount,
+        "status": "pending",
+        "source": "billcom",
+    }
+    with _invoices_lock:
+        locals_ = _local_invoices()
+        locals_[invoice_id] = inv_record
+        _save_local_invoices(locals_)
+
+    base_url = config.get("_base_url", "")
+    log.emit(
+        "invoice_refreshed",
+        f"Refreshed invoice {norm['number']} from Jira for {start}..{end}: "
+        f"{norm['hours']:g}h → {hours:g}h (${amount:.0f})",
+        links={"detail": f"{base_url}/billing"},
+        meta={"number": norm["number"], "start": start, "end": end,
+              "old_hours": norm["hours"], "hours": hours, "old_amount": norm["amount"], "amount": amount},
+    )
+    return inv_record
+
+
 class OverlapError(Exception):
     def __init__(self, conflict: dict):
         super().__init__(f"overlaps with {conflict.get('number', conflict.get('id'))}")
