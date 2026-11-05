@@ -1355,6 +1355,8 @@ def check(config: dict, instance_key: str = ""):
       a check outside ci_triaged_checks fails.
     - ci_passed: marker from monitor_ci that checks passed.
     - checks_started_at: CI monitoring window start timestamp.
+    - checks_heads: per-PR ("repo/id" keyed) head SHA the CI monitoring window
+      belongs to; a head that moves restarts the window.
     - ci_unrelated_checks: per-PR ("repo/id" keyed) check names triaged as not
       caused by our changes; _handle_ci_failure skips re-triage while the
       failing PR's set is covered, cleared whenever a new commit is pushed.
@@ -2148,6 +2150,8 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         ts.pop("pr_failed_reason", None)
         ts["conflict_resolution_attempts"] = 0
         ts.pop("last_conflict_error", None)
+        ts.pop("checks_started_at", None)
+        ts.pop("_ci_timeout_state", None)
         return ts
 
     return ts
