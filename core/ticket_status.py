@@ -167,8 +167,10 @@ PR_AUTOFIX = Cycle("pr_autofix", None, "pr_autofix_run", 3)
 AUTOMATED_REVIEW_FIX = Cycle("automated_review_fix", None, "fix_pr_comments", 3)
 TEST_FIX = Cycle("test_fix", TicketStatus.testing, "run_tests_and_fix", 3,
                  exit_edge=TicketStatus.tests_failed)
+DIRTY_REVIEW = Cycle("dirty_review", TicketStatus.reviewing, "start_reviewing", 2)
 
-CYCLES: tuple[Cycle, ...] = (SCOPE_FIX, BASE_SYNC, PR_AUTOFIX, AUTOMATED_REVIEW_FIX, TEST_FIX)
+CYCLES: tuple[Cycle, ...] = (SCOPE_FIX, BASE_SYNC, PR_AUTOFIX, AUTOMATED_REVIEW_FIX, TEST_FIX,
+                             DIRTY_REVIEW)
 
 
 def epic_edge(issue_type: str | None) -> str | None:

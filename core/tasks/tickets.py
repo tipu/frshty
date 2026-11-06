@@ -1524,11 +1524,26 @@ Cite file:line evidence for every claim. Do not modify any source file.
       preconditions=[status_is("reviewing"), file_exists("docs/change-manifest.md")],
       postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*(PASS|FAIL)")],
       on_success=_report_stage_end("ticket_review_complete", "Tri-review"),
-      timeout=REVIEW_TIMEOUT)
+      timeout=REVIEW_TIMEOUT + COMMIT_PHASE_TIMEOUT)
 def start_reviewing(ctx: TaskContext) -> TaskResult:
+    """Commit what the implement stage left in the worktree, then review.
+
+    The implement agent commits its own work, and a run that hits its timeout
+    or skips a file leaves the rest uncommitted. The review reads branch diffs,
+    so it would pass over that work, and enter_testing would then refuse the
+    ticket for it. This runs in every path into review, an orphan recovery of
+    start_planning included."""
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    _clean_workspace_scratch(ticket_dir)
+    committed = _commit_workspace_changes(
+        ticket_dir, ctx.ticket_key or "", config=ctx.config, describe=True,
+        message=f"chore: commit {ctx.ticket_key} work left uncommitted before review")
+    if committed:
+        log.emit("ticket_review_committed",
+                 f"Committed work left uncommitted for {ctx.ticket_key}: {', '.join(committed)}",
+                 meta={"ticket": ctx.ticket_key, "repos": committed})
     ts = state.load_ticket(ctx.ticket_key or "") or {}
     repos = repos_with_branch_diff(ctx.config, ts.get("slug") or "")
     repo_block = ""
@@ -1726,6 +1741,7 @@ def enter_testing(ctx: TaskContext) -> TaskResult:
     by plan_tests as a hint, not as a gate — every ticket that passes
     tri-review goes through the testing state."""
     ticket_dir = _ticket_dir(ctx)
+    _clean_workspace_scratch(ticket_dir)
     dirty = _dirty_workspace_repos(ticket_dir)
     if dirty:
         return TaskResult("failed",
@@ -1947,13 +1963,20 @@ def _fire_ticket_dev_complete(ctx: TaskContext) -> None:
 @task("enter_proving",
       preconditions=[status_is("testing"),
                      file_contains("docs/test-runs.md", r"VERDICT:\s*PASS")],
-      timeout=15)
+      timeout=15 + COMMIT_PHASE_TIMEOUT)
 def enter_proving(ctx: TaskContext) -> TaskResult:
     """Bridge from testing to either proving (PROOF.md present) or pr_ready
     (PROOF.md absent — skip the proof step). On the skip path, fires
     ticket_dev_complete inline so downstream listeners (schedule_pr) trigger
-    immediately, matching the no-proof-needed flow."""
+    immediately, matching the no-proof-needed flow.
+
+    A test run that passes commits nothing, so this commits what it left, the
+    same way mark_ready does. Nothing after this step would."""
     ticket_dir = _ticket_dir(ctx)
+    _clean_workspace_scratch(ticket_dir)
+    _commit_workspace_changes(
+        ticket_dir, ctx.ticket_key or "", config=ctx.config,
+        message=f"test: commit {ctx.ticket_key} work left by the test run")
     dirty = _dirty_workspace_repos(ticket_dir)
     if dirty:
         return TaskResult("failed",

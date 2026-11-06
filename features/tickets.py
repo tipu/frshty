@@ -1367,6 +1367,8 @@ def check(config: dict, instance_key: str = ""):
     - last_comment_ids: per-PR review-comment cursor.
     - comment_fix_attempts: per-review-comment fix attempt counts.
     - llm_sessions: per-task Claude session ids used by task workers.
+    - dirty_review_attempts: passes the blocked handler sent back to review
+      because enter_testing refused uncommitted work.
 
     Idempotency framework: any side-effect emit inside a handler whose
     semantics are "fire once per ticket lifetime" should be issued via

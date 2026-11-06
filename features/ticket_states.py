@@ -23,8 +23,9 @@ from typing import Protocol, TypedDict
 
 import core.freshness as freshness
 import core.log as log
+import core.queue as q
 import core.state as state
-from core.ticket_status import (TicketStatus, approval_edge, epic_edge, tests_failed_edge,
+from core.ticket_status import (DIRTY_REVIEW, TicketStatus, approval_edge, epic_edge, tests_failed_edge,
                                 transition)
 from pm import runner as pm_runner
 
@@ -101,6 +102,7 @@ class TicketState(TypedDict, total=False):
     - CI markers: ci_fix_attempts, ci_fix_heads, ci_passed, checks_started_at,
       checks_heads, _ci_timeout_state, ci_held_unrelated
     - scope review markers: scope_review
+    - resume markers: dirty_review_attempts
     - misc: llm_sessions
     """
     status: str
@@ -139,6 +141,7 @@ class TicketState(TypedDict, total=False):
     _ci_timeout_state: dict
     ci_held_unrelated: bool
     scope_review: dict
+    dirty_review_attempts: int
     llm_sessions: dict
 
 
@@ -608,6 +611,55 @@ def _handle_pr_failed_ticket(
     return ts, False
 
 
+def _parked_by_dirty_gate(instance_key: str, key: str) -> bool:
+    """True when the newest stage job of the ticket is enter_testing refusing
+    uncommitted work. advance_ticket only dispatches, so it is not a stage."""
+    for job in q.jobs_for_ticket(instance_key, key):
+        if job["task"] == "advance_ticket":
+            continue
+        return (job["task"] == "enter_testing" and job["status"] == "failed"
+                and "uncommitted changes" in (job["response"] or ""))
+    return False
+
+
+def _handle_blocked_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    """Send a ticket that enter_testing refused back through review.
+
+    Every other block waits for the operator. This one has a known remedy:
+    start_reviewing commits the leftover work and reviews it. The review on
+    disk read the branch without that work, so it goes, and the ticket earns a
+    fresh verdict instead of carrying the old one over unreviewed code.
+    DIRTY_REVIEW bounds the loop for a review that leaves new work behind each
+    time. The ticket waits while another ticket holds the repo gate."""
+    key = ticket["key"]
+    if not instance_key or not _parked_by_dirty_gate(instance_key, key):
+        return ts, True
+    attempts = ts.get("dirty_review_attempts", 0)
+    if not DIRTY_REVIEW.may_continue(attempts):
+        return ts, True
+    ws = config["workspace"]
+    review_file = ws["root"] / ws["tickets_dir"] / ts.get("slug", "") / "docs" / "tri-review.md"
+    with _t._gate_lock_for(instance_key):
+        if _t._repo_gate_blocked(instance_key, key, config):
+            return ts, True
+        review_file.unlink(missing_ok=True)
+        moved = state.transition_ticket(key, TicketStatus.reviewing.value,
+                                        reason="uncommitted work goes back through review",
+                                        dirty_review_attempts=attempts + 1)
+    log.emit("ticket_dirty_review_resumed",
+             f"{key}: enter_testing found uncommitted work; reviewing it again",
+             meta={"ticket": key, "attempt": attempts + 1})
+    ts.pop("blocked_from", None)
+    return {**ts, "status": moved["status"], "dirty_review_attempts": attempts + 1}, True
+
+
 _PRE_DISPATCH_HANDLERS: tuple[tuple[str, StateHandler], ...] = (
     (TicketStatus.merged, _handle_merged_ticket),
     (TicketStatus.validation, _handle_validation_ticket),
@@ -624,4 +676,5 @@ _STATUS_HANDLERS: tuple[tuple[str, StateHandler], ...] = (
     ("proving", _handle_proving_ticket),
     ("pr_ready", _handle_pr_ready_ticket),
     ("in_review", _handle_in_review_ticket),
+    ("blocked", _handle_blocked_ticket),
 )
