@@ -102,7 +102,7 @@
                 <div v-if="week.invoiceTag" class="invoice-tag" :class="week.invoiceTag.cls"
                      @click="week.invoiceTag.missing ? openInvoiceForm(wIdx, week, $event) : null">
                     <template v-if="week.invoiceTag.missing">MISSING · ~${{ week.invoiceTag.amount.toLocaleString() }}<br>{{ week.invoiceTag.days }} days · {{ week.invoiceTag.hours }}hrs</template>
-                    <template v-else>{{ week.invoiceTag.number }} · ${{ week.invoiceTag.amount.toLocaleString() }}<br>{{ week.invoiceTag.status }}<a v-if="week.invoiceTag.id && week.invoiceTag.source === 'billcom'" class="inv-dl" :href="'/api/billing/invoices/' + week.invoiceTag.id + '/pdf?number=' + encodeURIComponent(week.invoiceTag.number || '')" @click.stop title="Download PDF">⤓ PDF</a></template>
+                    <template v-else>{{ week.invoiceTag.number }} · ${{ week.invoiceTag.amount.toLocaleString() }}<br>{{ week.invoiceTag.status }}<a v-if="week.invoiceTag.id && week.invoiceTag.source === 'billcom'" class="inv-dl" :href="'/api/billing/invoices/' + week.invoiceTag.id + '/pdf?number=' + encodeURIComponent(week.invoiceTag.number || '')" @click.stop title="Download PDF">⤓ PDF</a><a v-if="week.invoiceTag.id && week.invoiceTag.source === 'billcom' && week.invoiceTag.status !== 'paid'" class="inv-dl" href="#" @click.stop.prevent="refreshInvoice(week.invoiceTag)" title="Rebuild the line items from Jira">{{ refreshingId === week.invoiceTag.id ? '…' : '↻ Jira' }}</a></template>
                 </div>
                 <div v-if="formOpenWeek === wIdx" class="inv-form" @click.stop>
                     <div style="font-size:13px;color:#4ade80;font-weight:600">{{ nextInvNumber }}</div>
@@ -179,6 +179,7 @@ frshtyApp({
         const previewLoading = ref(false);
         const previewError = ref('');
         const saving = ref(false);
+        const refreshingId = ref(null);
         let msgTimer = null;
 
         const extrasText = computed(() => {
@@ -465,6 +466,21 @@ frshtyApp({
             }
         }
 
+        async function refreshInvoice(tag) {
+            if (refreshingId.value) return;
+            if (!confirm(`Rebuild ${tag.number} line items from Jira? Hours and amount follow the current Jira worklogs and calendar.`)) return;
+            refreshingId.value = tag.id;
+            try {
+                const r = await api(`/api/billing/invoices/${encodeURIComponent(tag.id)}/refresh`, { method: 'POST' });
+                showMsg(`Refreshed ${r.number}: ${r.hours}h · $${r.amount.toLocaleString()}`);
+                await load();
+            } catch (e) {
+                showMsg(e.message, true);
+            } finally {
+                refreshingId.value = null;
+            }
+        }
+
         function showMsg(text, isError = false) {
             msg.value = text;
             msgKind.value = isError ? 'err' : 'ok';
@@ -492,7 +508,7 @@ frshtyApp({
             extrasText, credsWarn, scheduleSummary,
             weeks, missingSummary, missingTotals,
             formOpenWeek, formData, previewItems, previewLoading, previewError, saving,
-            cycleDay, openInvoiceForm, closeForm, saveInvoice,
+            cycleDay, openInvoiceForm, closeForm, saveInvoice, refreshInvoice, refreshingId,
         };
     },
 }).mount('#app');
