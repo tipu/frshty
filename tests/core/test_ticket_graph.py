@@ -60,7 +60,7 @@ class TestSuccessEdges:
 class TestCycles:
     def test_the_four_loops_are_declared(self):
         assert {c.name for c in CYCLES} == {"scope_fix", "base_sync", "pr_autofix",
-                                            "automated_review_fix", "test_fix"}
+                                            "automated_review_fix", "test_fix", "dirty_review"}
 
     def test_budgets(self):
         assert (SCOPE_FIX.budget, BASE_SYNC.budget, PR_AUTOFIX.budget,
