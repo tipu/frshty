@@ -1233,6 +1233,7 @@ def api_restart_ticket(key: str):
         ts.pop("pr_failed_reason", None)
         ts.pop("test_fix_attempts", None)
         ts.pop("tests_failed_at", None)
+        ts.pop("dirty_review_attempts", None)
         return ts
 
     ts = state.update_ticket(key, _reset)
