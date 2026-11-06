@@ -485,12 +485,14 @@ def update_worklog(config: dict, ticket: str, worklog_id: str, time_str: str) ->
         return {"error": resp.text}
 
 
-def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
+def _fetch_worklogs(config: dict, start_date: date, end_date: date, strict: bool = False) -> dict:
     jira = config.get("jira", {})
     base_url = jira.get("base_url", "")
     user = resolve_env(config, "jira", "user_env")
     token = resolve_env(config, "jira", "token_env")
     if not base_url or not user or not token:
+        if strict:
+            raise RuntimeError("Jira credentials are not configured")
         return {}
 
     user_account_id = jira.get("user_account_id")
@@ -510,6 +512,8 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
             resp = client.get(f"{base_url}/rest/api/3/search/jql", params=params)
             if resp.status_code != 200:
                 log.emit("fetch_worklogs_failed", f"Jira search failed: {resp.status_code} {resp.text}")
+                if strict:
+                    raise RuntimeError(f"Jira search failed: {resp.status_code}")
                 break
 
             data = resp.json()
@@ -528,6 +532,8 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
                     wl_resp = client.get(f"{base_url}/rest/api/3/issue/{key}/worklog")
                     if wl_resp.status_code == 200:
                         worklogs = wl_resp.json().get("worklogs", [])
+                    elif strict:
+                        raise RuntimeError(f"Jira worklog fetch for {key} failed: {wl_resp.status_code}")
                 
                 for wl in worklogs:
                     author = wl.get("author", {})

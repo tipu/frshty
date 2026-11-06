@@ -104,6 +104,22 @@ async def create_invoice(customer_id: str, invoice_number: str, due_date: str, l
         return r.json()
 
 
+async def replace_invoice(invoice_id: str, customer_id: str, invoice_number: str, invoice_date: str,
+                          due_date: str, line_items: list) -> dict:
+    h = await _headers()
+    async with external_log.aclient("billcom", timeout=30) as c:
+        r = await c.put(f"{BASE}/invoices/{invoice_id}", headers=h, json={
+            "customer": {"id": customer_id},
+            "invoiceNumber": invoice_number,
+            "invoiceDate": invoice_date,
+            "dueDate": due_date,
+            "invoiceLineItems": line_items,
+            "processingOptions": {"sendEmail": False},
+        })
+        r.raise_for_status()
+        return r.json()
+
+
 async def list_invoices(max_results: int = 100, customer_id: str | None = None) -> dict | list:
     h = await _headers()
     params: dict = {"max": max_results}
