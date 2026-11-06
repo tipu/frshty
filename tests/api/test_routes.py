@@ -1,4 +1,5 @@
 import json
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -1042,6 +1043,8 @@ class TestReviews:
         data = resp.json()
         assert data["pr_id"] == 123
         assert data["repo"] == "org/repo"
+        process = mock_proc.call_args.kwargs
+        inspect.signature(process["target"]).bind(*process["args"])
 
 
 class TestRerunReview:
