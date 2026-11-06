@@ -59,6 +59,18 @@ def api_billing_create_invoice(body: dict):
         return JSONResponse({"error": f"billcom failed: {e}"}, status_code=502)
 
 
+@router.post("/api/billing/invoices/{invoice_id}/refresh")
+def api_billing_refresh_invoice(invoice_id: str):
+    try:
+        return asyncio.run(billing.refresh_invoice(_config, invoice_id))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except httpx.HTTPError as e:
+        log.emit("invoice_refresh_failed", f"bill.com refresh failed: {e}",
+                 meta={"id": invoice_id, "err": str(e)[:200]})
+        return JSONResponse({"error": f"billcom failed: {e}"}, status_code=502)
+
+
 @router.get("/api/billing/invoices/{invoice_id}/pdf")
 def api_billing_invoice_pdf(invoice_id: str, number: str = ""):
     try:
