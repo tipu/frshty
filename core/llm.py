@@ -446,6 +446,7 @@ STRUCTURED_ONLY_TOOLS = {"*": False, "StructuredOutput": True}
 _LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 PUBLISH_DENIED_TOOLS = ("Bash(git push:*)", "Bash(curl:*)", "Bash(gh:*)")
 HEADLESS_DENIED_TOOLS = ("ScheduleWakeup",)
+NO_BACKGROUND_WAIT_CEILING = {"CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
 NO_PUBLISH_RULE = (
     "Do not push, do not open a pull request, and do not update the ticket in "
     "Jira or any other tracker: frshty does those steps itself."
@@ -605,6 +606,7 @@ class ClaudeProvider(LLMProvider):
                  resume: bool = False, model: str | None = None,
                  allowed_tools: list[str] | None = None,
                  denied_tools: tuple[str, ...] | list[str] = PUBLISH_DENIED_TOOLS,
+                 env_extra: dict[str, str] | None = None,
                  **kwargs) -> str | None:
         chosen_model = model or _DEFAULT_MODEL
         cmd = self._cmd(
@@ -655,7 +657,8 @@ class ClaudeProvider(LLMProvider):
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    cwd=str(cwd) if cwd else None, env=self._env(), text=True, bufsize=1, errors="replace",
+                    cwd=str(cwd) if cwd else None, env={**self._env(), **(env_extra or {})},
+                    text=True, bufsize=1, errors="replace",
                     start_new_session=True,
                 )
             except OSError as e:
