@@ -279,7 +279,8 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
 
     def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0,
                               session_id: str | None = None,
-                              resume: bool = False):
+                              resume: bool = False,
+                              env_extra: dict[str, str] | None = None):
         cwd = Path(cwd)
         if "save it as docs/FLOW.html" in prompt:
             (cwd / "docs" / "FLOW.html").write_text("<html><body>flow</body></html>")

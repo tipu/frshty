@@ -345,6 +345,21 @@ class TestStartReviewing:
         assert result.status == "failed"
         assert "windows-agent" in result.reason
 
+    def test_the_review_run_keeps_its_background_reviewers_past_the_cli_ceiling(
+            self, fake_config, tmp_state):
+        """DEV-928: the reviewers run as background sub-agents. The CLI stopped
+        them ten minutes after the last turn and exited 0 with no report."""
+        _seed(status="reviewing")
+        _ticket_dir(fake_config)
+        runner = MagicMock(return_value="done")
+        with patch("core.tasks.tickets.repos_with_branch_diff",
+                   return_value=self._repos(fake_config)), \
+             patch("core.tasks.tickets.run_claude_code", runner), \
+             patch("core.tasks.tickets.log.emit"):
+            T.start_reviewing(_ctx(fake_config, "start_reviewing"))
+        assert runner.call_args.kwargs["env_extra"] == {
+            "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS": "0"}
+
     def test_full_coverage_passes(self, fake_config, tmp_state):
         result, _ = self._run(
             fake_config,

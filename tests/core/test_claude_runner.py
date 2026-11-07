@@ -229,6 +229,24 @@ def test_run_claude_code_preserves_unicode_in_text_deltas(tmp_path, monkeypatch)
     assert log_path.read_bytes() == "héllo — 世界".encode("utf-8")
 
 
+def test_run_claude_code_passes_env_extra_to_that_run_only(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    env_capture = tmp_path / "env.txt"
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("ok") + "\n")
+    _install_fake_claude(
+        bin_dir,
+        f'printf "[%s]" "$CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS" >> "{env_capture}"\ncat "{events_file}"',
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.delenv("CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", raising=False)
+
+    run_claude_code("hi", cwd=tmp_path, timeout=5, env_extra=llm.NO_BACKGROUND_WAIT_CEILING)
+    run_claude_code("hi", cwd=tmp_path, timeout=5)
+
+    assert env_capture.read_text() == "[0][]"
+
+
 def test_run_claude_code_honors_instance_claude_config_dir(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     env_capture = tmp_path / "env.txt"

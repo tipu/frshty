@@ -338,7 +338,8 @@ class TestStartReviewingRecovery:
         docs.mkdir(parents=True)
         (docs / "change-manifest.md").write_text("# Manifest\n")
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False,
+                            env_extra=None):
             tri = Path(cwd) / "docs" / "tri-review.md"
             tri.write_text("VERDICT: PASS\n")
             return "ok"
@@ -369,7 +370,8 @@ class TestStartReviewingRecovery:
         (docs / "change-manifest.md").write_text("# Manifest\n")
         (docs / "tri-review.md").write_text("## Review\nSome findings but no verdict line\n")
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False,
+                            env_extra=None):
             tri = Path(cwd) / "docs" / "tri-review.md"
             tri.write_text("## Review\n## Verdict\nVERDICT: PASS\n")
             return "ok"
