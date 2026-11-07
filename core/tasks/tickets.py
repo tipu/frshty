@@ -18,7 +18,7 @@ import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, parse_structured, strict_object
 from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject, keyed, merge_message_args
-from core.llm import NO_PUBLISH_RULE, rules_directive
+from core.llm import NO_BACKGROUND_WAIT_CEILING, NO_PUBLISH_RULE, rules_directive
 from core.config import (
     base_branch_for, ci_env_enabled, get_repos, ticket_rules_files, ticket_worktree_path,
 )
@@ -1561,7 +1561,8 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
     log.emit("ticket_review_started", f"Headless tri-review for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key,
                    "repos": [name for name, _, _ in repos]})
-    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=REVIEW_TIMEOUT,
+                                 env_extra=NO_BACKGROUND_WAIT_CEILING)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     review = ticket_dir / "docs" / "tri-review.md"

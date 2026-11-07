@@ -337,7 +337,8 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
 
     def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0,
                               session_id: str | None = None, resume: bool = False,
-                              denied_tools: tuple[str, ...] = ()):
+                              denied_tools: tuple[str, ...] = (),
+                              env_extra: dict[str, str] | None = None):
         cwd = Path(cwd)
         if "/ctp docs/" in prompt:
             docs = cwd / "docs"
