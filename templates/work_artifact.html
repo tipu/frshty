@@ -22,9 +22,9 @@ body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif
 #path { color: #d5d5dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
 #frame { flex: 1; min-width: 0; height: 100%; border: 0; background: #fff; }
-#toggle { background: #1e1e2e; color: #d5d5dc; border: 1px solid #3a3a48; border-radius: 4px;
+#toggle, #restart { background: #1e1e2e; color: #d5d5dc; border: 1px solid #3a3a48; border-radius: 4px;
           padding: 5px 10px; font: inherit; cursor: pointer; }
-#toggle:hover { background: #2a2a3c; }
+#toggle:hover, #restart:hover { background: #2a2a3c; }
 #fav { background: none; border: 0; color: #777; font-size: 16px; line-height: 1; cursor: pointer; padding: 0; }
 #fav.on { color: #facc15; }
 #status { white-space: nowrap; }
@@ -48,6 +48,7 @@ body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif
 </div>
 <div id="bottom" class="bar">
   <button id="toggle" type="button">Ask Claude about this artifact</button>
+  <button id="restart" type="button" hidden>Restart Claude</button>
   <span id="status"></span>
 </div>
 <script>
@@ -61,7 +62,8 @@ const baseTitle = document.title;
 const statusEl = document.getElementById("status");
 const panel = document.getElementById("panel");
 const toggle = document.getElementById("toggle");
-let term = null, fit = null, ws = null, delay = 0;
+const restartBtn = document.getElementById("restart");
+let term = null, fit = null, ws = null, delay = 0, retry = null;
 
 function sendSize() {
   if (ws && ws.readyState === WebSocket.OPEN && term) {
@@ -84,14 +86,14 @@ function connect() {
     }
     delay = Math.min(delay ? delay * 2 : 500, 8000);
     statusEl.textContent = `reconnecting in ${delay}ms…`;
-    setTimeout(() => { term.reset(); connect(); }, delay);
+    retry = setTimeout(() => { term.reset(); connect(); }, delay);
   };
 }
 
-async function start() {
-  statusEl.textContent = "starting claude…";
+async function launch(restart) {
+  statusEl.textContent = restart ? "restarting claude…" : "starting claude…";
   try {
-    const resp = await fetch(`${apiBase}/api/work/artifacts/${id}/claude/start`, { method: "POST" });
+    const resp = await fetch(`${apiBase}/api/work/artifacts/${id}/claude/start${restart ? "?restart=true" : ""}`, { method: "POST" });
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       statusEl.textContent = "error: " + (body.error || resp.statusText);
@@ -101,6 +103,11 @@ async function start() {
     statusEl.textContent = "error: " + (e.message || String(e));
     return false;
   }
+  return true;
+}
+
+async function start() {
+  if (!(await launch(false))) return false;
   term = new Terminal({
     cursorBlink: true, fontSize: 14,
     fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
@@ -116,8 +123,24 @@ async function start() {
   new ResizeObserver(() => { if (panel.classList.contains("open")) { fit.fit(); sendSize(); } })
     .observe(document.getElementById("term"));
   connect();
+  restartBtn.hidden = false;
   return true;
 }
+
+restartBtn.addEventListener("click", async () => {
+  restartBtn.disabled = true;
+  try {
+    if (!(await launch(true))) return;
+    clearTimeout(retry);
+    if (ws) { ws.onclose = null; ws.close(); }
+    delay = 0;
+    term.reset();
+    connect();
+    term.focus();
+  } finally {
+    restartBtn.disabled = false;
+  }
+});
 
 toggle.addEventListener("click", async () => {
   if (panel.classList.contains("open")) {
