@@ -678,7 +678,7 @@ def api_work_artifact(artifact_id: int):
 
 
 @router.post("/api/work/artifacts/{artifact_id}/claude/start")
-def api_artifact_claude_start(artifact_id: int):
+def api_artifact_claude_start(artifact_id: int, restart: bool = False):
     row = db.query_one(
         "SELECT a.path, a.note, a.work_item_id, i.objective FROM work_artifacts a "
         "LEFT JOIN work_items i ON i.id = a.work_item_id WHERE a.id = ?",
@@ -696,6 +696,8 @@ def api_artifact_claude_start(artifact_id: int):
     if config is None:
         return JSONResponse({"error": "personal instance not loaded"}, status_code=409)
     key = f"artifact-{artifact_id}"
+    if restart:
+        terminal.kill_terminal(key)
     if not terminal.session_healthy(key)["agent_running"]:
         context = (
             f"The operator opened this session from the board to ask about one "

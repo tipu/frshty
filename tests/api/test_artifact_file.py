@@ -276,6 +276,24 @@ class TestArtifactClaudeRoute:
         assert launched == []
         assert scheduled == [f"artifact-{artifact_id}"]
 
+    def test_restart_kills_a_running_session_and_launches_a_new_one(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        launched, scheduled = self._stub(tmp_path, monkeypatch, running=True)
+        killed = []
+
+        def kill(key):
+            killed.append(key)
+            monkeypatch.setattr(work_routes.terminal, "session_healthy",
+                                lambda key, agent="claude": {"alive": False,
+                                                             "agent_running": False})
+        monkeypatch.setattr(work_routes.terminal, "kill_terminal", kill)
+        resp = work_routes.api_artifact_claude_start(artifact_id, restart=True)
+        key = f"artifact-{artifact_id}"
+        assert resp["status"] == "ok"
+        assert killed == [key]
+        assert [k for k, _, _ in launched] == [key]
+        assert scheduled == [key]
+
     def test_refuses_an_artifact_outside_every_root(self, tmp_path, monkeypatch):
         artifact_id = _seed(tmp_path, monkeypatch, "elsewhere")
         launched, _ = self._stub(tmp_path, monkeypatch)

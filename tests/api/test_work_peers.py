@@ -487,7 +487,7 @@ class TestPeerArtifactLinks:
     def test_viewer_asks_claude_on_the_peer(self):
         text = self._read("templates/work_artifact.html")
         assert 'getElementById("bottom").style.display' not in text
-        assert "fetch(`${apiBase}/api/work/artifacts/${id}/claude/start`" in text
+        assert "fetch(`${apiBase}/api/work/artifacts/${id}/claude/start${restart ? \"?restart=true\" : \"\"}`" in text
         assert "`/ws/peers/${encodeURIComponent(peer)}/terminal/artifact-${id}`" in text
 
     def test_no_page_sends_the_browser_to_a_peer_base_url_for_an_artifact(self):
