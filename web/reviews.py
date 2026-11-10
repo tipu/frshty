@@ -97,11 +97,13 @@ def api_submit_review(body: dict):
     pending_dir.mkdir(parents=True, exist_ok=True)
     (pending_dir / "queued_comments.json").write_text(json.dumps([{"pr_id": pr_id, "repo": repo_short, "pr_url": url, "status": "pending"}]))
     (pending_dir / "review.json").write_text(json.dumps({"verdict": "", "status": "reviewing"}))
-    multiprocessing.Process(
+    process = multiprocessing.Process(
         target=_run_review,
         args=(str(_config["_config_path"]), _config["_state_dir"], _config["job"]["key"], full_repo, pr_id, url),
         daemon=True,
-    ).start()
+    )
+    process.start()
+    threading.Thread(target=process.join, daemon=True).start()
     return {"status": "started", "repo": full_repo, "pr_id": pr_id}
 
 

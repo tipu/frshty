@@ -1,6 +1,8 @@
 import json
 import inspect
+import multiprocessing
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -1045,6 +1047,24 @@ class TestReviews:
         assert data["repo"] == "org/repo"
         process = mock_proc.call_args.kwargs
         inspect.signature(process["target"]).bind(*process["args"])
+
+    def test_submit_reaps_the_review_process(self, client):
+        started = []
+        real_process = multiprocessing.Process
+
+        def record(*args, **kwargs):
+            process = real_process(target=time.sleep, args=(0,), daemon=True)
+            started.append(process)
+            return process
+
+        with patch("web.reviews.multiprocessing.Process", side_effect=record):
+            resp = client.post("/api/reviews/submit", json={"url": "https://github.com/org/repo/pull/124"})
+        assert resp.status_code == 200
+        stat = Path(f"/proc/{started[0].pid}/stat")
+        deadline = time.monotonic() + 10
+        while stat.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert not stat.exists()
 
 
 class TestRerunReview:
