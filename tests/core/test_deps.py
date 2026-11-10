@@ -151,6 +151,36 @@ class TestEnsureSharedVenv:
         assert not (link / "marker").exists()
 
 
+class TestVenvReadyMarker:
+    def test_build_writes_the_marker(self, fake_config, tmp_path, monkeypatch):
+        monkeypatch.setenv("BUILD_LOG", str(tmp_path / "builds.log"))
+        wt = _make_worktree(tmp_path, "a")
+        assert deps.ensure_shared_venv(fake_config, "repo", wt, dep_cmd=STUB_BUILD)
+        venv = deps.venv_store_dir(fake_config) / deps.shared_venv_name("repo", wt)
+        assert (venv / deps.READY_MARKER).is_file()
+
+    def test_a_killed_build_without_marker_is_rebuilt(self, fake_config, tmp_path, monkeypatch):
+        build_log = tmp_path / "builds.log"
+        monkeypatch.setenv("BUILD_LOG", str(build_log))
+        wt = _make_worktree(tmp_path, "a")
+        venv = deps.venv_store_dir(fake_config) / deps.shared_venv_name("repo", wt)
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").touch()
+        (venv / "half-installed").touch()
+        assert deps.ensure_shared_venv(fake_config, "repo", wt, dep_cmd=STUB_BUILD)
+        assert build_log.read_text().count("build") == 1
+        assert not (venv / "half-installed").exists()
+        assert (venv / deps.READY_MARKER).is_file()
+
+    def test_relink_skips_a_venv_without_marker(self, fake_config, tmp_path):
+        wt = _make_worktree(tmp_path, "a")
+        venv = deps.venv_store_dir(fake_config) / deps.shared_venv_name("repo", wt)
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").touch()
+        deps.relink_shared_venv(fake_config, "repo", wt)
+        assert not (wt / ".venv").is_symlink()
+
+
 class TestRelink:
     def test_restores_symlink_after_clean(self, fake_config, tmp_path, monkeypatch):
         build_log = tmp_path / "builds.log"
@@ -278,11 +308,135 @@ class TestInstallWorktreeDeps:
         fake_config["workspace"]["dep_commands"] = [{"match": "repo", "cmd": "npm ci"}]
         fake_config["workspace"]["review_dep_commands"] = [
             {"match": "repo", "cmd": "pnpm install --ignore-scripts"}]
-        with patch("core.deps.subprocess.run") as run:
+        with patch("core.deps.subprocess.run") as run, \
+             patch("core.deps._git_output", return_value=None):
             run.return_value.returncode = 0
             deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
         assert [c.args[0] for c in run.call_args_list] == [
             ["pnpm", "install", "--ignore-scripts"]]
+
+
+def _git_worktree(root):
+    wt = root / "wt"
+    wt.mkdir()
+    for argv in (["init", "-q"], ["config", "user.email", "t@example.com"],
+                 ["config", "user.name", "t"]):
+        subprocess.run(["git", *argv], cwd=wt, check=True)
+    (wt / "pnpm-lock.yaml").write_text("lockfileVersion: 9\n")
+    (wt / "schema.prisma").write_text("model A { id Int @id }\n")
+    (wt / "README.md").write_text("one\n")
+    _commit(wt)
+    return wt
+
+
+def _commit(wt):
+    subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
+    subprocess.run(["git", "commit", "-qm", "c"], cwd=wt, check=True)
+
+
+class TestReviewSkipsUnchangedDeps:
+    def _install(self, config, wt, log_path, fail=False):
+        cmd = (f"sh -c 'echo run >> {log_path}; exit {1 if fail else 0}'")
+        config["workspace"]["review_dep_commands"] = [{"match": "repo", "cmd": cmd}]
+        deps.install_worktree_deps(config, "repo", wt, "review_dep_commands")
+        return log_path.read_text().count("run") if log_path.exists() else 0
+
+    def test_unchanged_manifests_skip_the_second_run(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        assert self._install(fake_config, wt, runs) == 1
+        (wt / "README.md").write_text("two\n")
+        _commit(wt)
+        assert self._install(fake_config, wt, runs) == 1, \
+            "a commit that touches no manifest must not re-run the entry"
+        assert not (wt / deps.DEP_STAMP).exists()
+
+    def test_a_lockfile_change_runs_again(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        self._install(fake_config, wt, runs)
+        (wt / "pnpm-lock.yaml").write_text("lockfileVersion: 9\nx: 1\n")
+        _commit(wt)
+        assert self._install(fake_config, wt, runs) == 2
+
+    def test_a_schema_change_runs_again(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        self._install(fake_config, wt, runs)
+        (wt / "schema.prisma").write_text("model B { id Int @id }\n")
+        _commit(wt)
+        assert self._install(fake_config, wt, runs) == 2
+
+    def test_a_failed_run_is_not_stamped(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        with patch("core.deps.log.emit"):
+            self._install(fake_config, wt, runs, fail=True)
+        assert self._install(fake_config, wt, runs) == 2
+
+    def test_a_changed_script_runs_again(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        script = tmp_path / "recipe.sh"
+        script.write_text(f"echo run >> {runs}\n")
+        fake_config["workspace"]["review_dep_commands"] = [
+            {"match": "repo", "cmd": f"sh {script}"}]
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert runs.read_text().count("run") == 1
+        script.write_text(f"echo run >> {runs}\necho v2 > /dev/null\n")
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert runs.read_text().count("run") == 2
+
+    def test_a_script_inside_sh_c_is_fingerprinted(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        script = tmp_path / "recipe.sh"
+        script.write_text(f"echo run >> {runs}\n")
+        fake_config["workspace"]["review_dep_commands"] = [
+            {"match": "repo", "cmd": f"sh -c 'sh {script}'"}]
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        script.write_text(f"echo run >> {runs}\necho v2 > /dev/null\n")
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert runs.read_text().count("run") == 2
+
+    def test_absolute_paths_are_found_in_every_shell_form(self):
+        cmd = ("sh -c 'sh /opt/recipe.sh; true' --cli=/opt/cli.js "
+               "sh '/opt/review recipes/install.sh' a/b")
+        assert {"/opt/recipe.sh", "/opt/cli.js", "/opt/review recipes/install.sh"} \
+            <= set(deps._absolute_paths(cmd))
+        assert "a/b" not in deps._absolute_paths(cmd)
+
+    def test_a_step_that_writes_a_tracked_file_runs_after_the_reset(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        fake_config["workspace"]["review_dep_commands"] = [
+            {"match": "repo", "cmd": f"sh -c 'echo run >> {runs}; echo gen > README.md'"}]
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert runs.read_text().count("run") == 1
+        subprocess.run(["git", "reset", "-q", "--hard"], cwd=wt, check=True)
+        deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert runs.read_text().count("run") == 2
+        assert (wt / "README.md").read_text() == "gen\n"
+
+    def test_pipenv_entries_always_run(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        fake_config["workspace"]["review_dep_commands"] = [
+            {"match": "repo", "cmd": "pipenv install --dev"}]
+        with patch("core.deps.run_dep_command", return_value=None) as run:
+            deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+            deps.install_worktree_deps(fake_config, "repo", wt, "review_dep_commands")
+        assert run.call_count == 2
+
+    def test_ticket_dep_commands_always_run(self, fake_config, tmp_path):
+        wt = _git_worktree(tmp_path)
+        runs = tmp_path / "runs.log"
+        fake_config["workspace"]["dep_commands"] = [
+            {"match": "repo", "cmd": f"sh -c 'echo run >> {runs}'"}]
+        deps.install_worktree_deps(fake_config, "repo", wt)
+        deps.install_worktree_deps(fake_config, "repo", wt)
+        assert runs.read_text().count("run") == 2
 
 
 class TestExportPnpmStore:
@@ -329,3 +483,18 @@ class TestGc:
 
     def test_noop_without_store(self, fake_config):
         assert deps.gc_dep_stores(fake_config) == {"deleted": []}
+
+    def _prune_calls(self, fake_config):
+        deps.venv_store_dir(fake_config).mkdir(parents=True)
+        deps.pnpm_store_dir(fake_config).mkdir(parents=True)
+        with patch("core.deps.subprocess.run") as run:
+            deps.gc_dep_stores(fake_config)
+        return [c.args[0] for c in run.call_args_list if c.args[0][:3] == ["pnpm", "store", "prune"]]
+
+    def test_prunes_the_pnpm_store(self, fake_config):
+        assert self._prune_calls(fake_config) == [["pnpm", "store", "prune"]]
+
+    def test_offline_review_installs_keep_the_pnpm_store(self, fake_config):
+        fake_config["workspace"]["review_dep_commands"] = [
+            {"match": "repo", "cmd": "pnpm install --frozen-lockfile --offline --ignore-scripts"}]
+        assert self._prune_calls(fake_config) == []
