@@ -12,8 +12,10 @@ file fill it:
 `sweep` removes a pytest run whose directory did not change for STALE_S and a
 library file older than STALE_S. It keeps the run that pytest-current points
 to, a run whose .lock names a live pid, and every path that a live process
-has as its cwd, holds open or maps. It removes nothing when it cannot read
-the /proc entry of a live process.
+has as its cwd, holds open or maps. A zombie process whose threads have all
+exited holds no path, and the kernel makes its fd directory readable only by
+root, so the sweep skips it.
+It removes nothing when it cannot read the /proc entry of a live process.
 It touches nothing else in /tmp: claude-1000, cc-socks, frshty-xauth and
 .X11-unix match neither pattern.
 
@@ -67,9 +69,29 @@ def _live_paths(proc: str = "/proc") -> set[str]:
             except (FileNotFoundError, ProcessLookupError):
                 pass
             except OSError as e:
+                if _zombie(base):
+                    break
                 if os.path.exists(base):
                     raise ProcUnreadable(f"{base}: {e}") from e
     return paths
+
+
+def _zombie(base: str) -> bool:
+    """True when every thread of the process at base has exited and the
+    process waits for its parent to reap it. A leader thread can exit while
+    other threads still run, so it reads the state of each task. The state
+    field follows the last ')' of a stat file, since the command name can
+    hold a ')'."""
+    try:
+        tids = os.listdir(os.path.join(base, "task"))
+        states = []
+        for tid in tids:
+            with open(os.path.join(base, "task", tid, "stat"), errors="surrogateescape") as f:
+                fields = f.read().rpartition(")")[2].split()
+            states.append(fields[0] if fields else "")
+    except OSError:
+        return False
+    return bool(states) and all(s in ("Z", "X") for s in states)
 
 
 def _cwd(base: str) -> list[str]:

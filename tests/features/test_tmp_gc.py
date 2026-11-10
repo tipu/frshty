@@ -113,6 +113,40 @@ def test_removes_nothing_when_a_live_process_is_unreadable(tmp_path):
     assert (root / SO).exists() and (root / "pytest-of-claude" / "pytest-1").exists()
 
 
+def _unreadable_fd(proc, pid, states):
+    _process(proc, pid)
+    os.rmdir(proc / str(pid) / "fd")
+    (proc / str(pid) / "fd").write_text("")
+    for i, st in enumerate(states):
+        task = proc / str(pid) / "task" / str(pid + i)
+        task.mkdir(parents=True)
+        (task / "stat").write_text(f"{pid + i} (py) thon) {st} 1 7 1 0 -1\n")
+
+
+def test_skips_a_zombie_process_whose_fd_directory_is_unreadable(tmp_path):
+    root, proc, config = _tree(tmp_path)
+    _unreadable_fd(proc, 10, ["Z"])
+    result = tmp_gc.sweep(config, force=True, root=str(root), proc=str(proc))
+    assert "stopped" not in result
+    assert str(root / SO) in result["removed"]
+
+
+def test_stops_when_a_live_process_fd_directory_is_unreadable(tmp_path):
+    root, proc, config = _tree(tmp_path)
+    _unreadable_fd(proc, 10, ["S"])
+    result = tmp_gc.sweep(config, force=True, root=str(root), proc=str(proc))
+    assert result["removed"] == []
+    assert "stopped" in result
+
+
+def test_stops_when_a_zombie_leader_has_a_live_thread(tmp_path):
+    root, proc, config = _tree(tmp_path)
+    _unreadable_fd(proc, 10, ["Z", "S"])
+    result = tmp_gc.sweep(config, force=True, root=str(root), proc=str(proc))
+    assert result["removed"] == []
+    assert "stopped" in result
+
+
 def test_reads_maps_with_a_non_utf8_path(tmp_path):
     root, proc, config = _tree(tmp_path)
     _process(proc, 10, maps=[str(root / SO)])
