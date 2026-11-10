@@ -8,10 +8,13 @@ worktree holds about 1.6 GB.
 
 `sweep` removes each of those worktrees that carries frshty's lock and was
 not used for IDLE_DAYS, or whose branch has a PR and every such PR is merged
-or closed, through git_util.release_worktree, which keeps a worktree with a
-local change or a HEAD that no remote branch holds. The worktree directory
-is the branch with "/" replaced by "-"; the sweep reads the branch from the
-remote branch of that name, else takes the directory name. Each
+or closed, through git_util.release_worktree, which keeps an idle worktree
+with a local change or a HEAD that no remote branch holds. A worktree whose
+PRs are all merged or closed is removed even then: release_worktree first
+records the local changes and the HEAD under
+refs/frshty-salvage/pr/<directory>. The worktree directory is the branch
+with "/" replaced by "-"; the sweep reads the branch from the remote branch
+of that name, else takes the directory name. Each
 feature's _ensure_worktree adds the worktree again when its PR needs it, so
 a removed worktree of a PR that is still open costs one checkout. The reset
 and base merge that own_prs runs on each open PR worktree do not count as
@@ -164,25 +167,30 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
                 kept[path] = "admin directory not found"
                 continue
             still_idle = lambda p=path: _idle(p, cutoff)
-            if not _idle(path, cutoff):
+            idle = _idle(path, cutoff)
+            if not idle or git_util.worktree_loss(path) in git_util.SALVAGEABLE_LOSSES:
                 if platform is None:
                     try:
                         platform = make_platform(config)
                     except Exception as e:
-                        kept[path] = f"no platform to read the PR state: {e}"[:200]
-                        continue
-                pr_closed = _pr_closed(platform, repo, path)
-                if pr_closed is None:
-                    kept[path] = "PR state query failed"
+                        if not idle:
+                            kept[path] = f"no platform to read the PR state: {e}"[:200]
+                            continue
+                pr_closed = _pr_closed(platform, repo, path) if platform is not None else None
+                if pr_closed:
+                    closed.append(path)
+                    if not idle:
+                        still_idle = lambda p=path, u=used: _last_used(p) == u
+                elif not idle:
+                    if pr_closed is None:
+                        kept[path] = "PR state query failed"
                     continue
-                if not pr_closed:
-                    continue
-                closed.append(path)
-                still_idle = lambda p=path, u=used: _last_used(p) == u
+            label = f"pr/{Path(path).name}" if path in closed else None
             if dry_run:
-                reason = git_util.worktree_loss(path)
+                reason = git_util.removal_blocker(path, salvage=label is not None)
             else:
-                reason = git_util.release_worktree(repo["path"], path, still_idle=still_idle)
+                reason = git_util.release_worktree(repo["path"], path, still_idle=still_idle,
+                                                   salvage_label=label)
             if reason:
                 kept[path] = reason
             else:

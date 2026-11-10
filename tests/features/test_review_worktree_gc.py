@@ -78,6 +78,14 @@ def _review(repo, state, branch, pr_id, queued=False, age=OLD):
     return path
 
 
+def _salvaged(repo, label):
+    """The single salvage ref of `label` in `repo`."""
+    refs = _git(repo, "for-each-ref", "--format=%(refname)",
+                git_util.salvage_ref(label)).split()
+    assert len(refs) == 1, refs
+    return refs[0]
+
+
 def _listed(repo, path):
     return any(lines[0] == f"worktree {path}" for lines in git_util.worktree_entries(repo) or [])
 
@@ -95,9 +103,10 @@ def test_removes_the_worktree_of_a_closed_pr_and_keeps_its_review_files(tmp_path
 
     result = review_worktree_gc.sweep(config, now=_later(), force=True)
 
-    assert sorted(result["removed"]) == sorted([str(merged), str(closed), str(declined), str(nofile)])
-    assert result["kept"] == {str(dirty): "local changes"}
-    for path in (merged, closed, declined, nofile):
+    assert sorted(result["removed"]) == sorted(
+        [str(merged), str(closed), str(declined), str(nofile), str(dirty)])
+    assert result["kept"] == {}
+    for path in (merged, closed, declined, nofile, dirty):
         assert not path.exists()
         assert not _listed(repo, str(path))
         assert (path.parent / "diff.txt").read_text() == "diff"
@@ -105,7 +114,8 @@ def test_removes_the_worktree_of_a_closed_pr_and_keeps_its_review_files(tmp_path
         assert (path.parent / "queued_comments.json").exists()
     assert (merged.parent / "review.json").exists()
     assert still_open.is_dir() and _listed(repo, str(still_open))
-    assert (dirty / "a.txt").read_text() == "changed\n"
+    ref = _salvaged(repo, "review/app/dirty")
+    assert _git(repo, "show", f"{ref}:a.txt") == "changed\n"
     assert ("app", 3) in platform.asked
 
 

@@ -9,11 +9,11 @@ PR on the same branch resets the worktree before it writes the PR's id. It
 asks the platform for the state of each PR that a review folder records in
 review*.json or queued_comments*.json. When every one of them is merged or
 closed, or when no review file names a PR, it removes the worktree through
-git_util.release_worktree, which runs
-`git worktree remove` and keeps a worktree with a local change or a HEAD that
-no remote branch holds. It removes only the worktree directory: review.json,
-queued_comments*.json and diff.txt stay, because /reviews and
-services.review_store read them.
+git_util.release_worktree. A local change or a HEAD that no remote branch
+holds does not keep the worktree: release_worktree first records them under
+refs/frshty-salvage/review/<repo>/<branch folder>. It removes only the
+worktree directory: review.json, queued_comments*.json and diff.txt stay,
+because /reviews and services.review_store read them.
 
 The cron fan-out routes the sweep to every instance with review_prs. It runs
 at most once per SWEEP_INTERVAL_S. Run it by hand for an instance that cannot
@@ -139,11 +139,13 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
                     continue
                 if not all(s in CLOSED_STATES for s in pr_states):
                     continue
+            label = f"review/{repo['name']}/{real.parent.name}"
             if dry_run:
-                reason = git_util.worktree_loss(path)
+                reason = git_util.removal_blocker(path, salvage=True)
             else:
                 reason = git_util.release_worktree(
-                    repo["path"], path, still_idle=lambda p=path: _idle(p, cutoff))
+                    repo["path"], path, still_idle=lambda p=path: _idle(p, cutoff),
+                    salvage_label=label)
             if reason:
                 kept[path] = reason
             else:

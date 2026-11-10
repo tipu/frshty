@@ -69,6 +69,14 @@ def _add(repo, state, sub, branch, age=OLD):
     return path
 
 
+def _salvaged(repo, label):
+    """The single salvage ref of `label` in `repo`."""
+    refs = _git(repo, "for-each-ref", "--format=%(refname)",
+                git_util.salvage_ref(label)).split()
+    assert len(refs) == 1, refs
+    return refs[0]
+
+
 def _locked(repo, path):
     for lines in git_util.worktree_entries(repo) or []:
         if lines[0] == f"worktree {path}":
@@ -216,16 +224,43 @@ def test_removes_a_worktree_of_a_merged_or_closed_pr_without_the_idle_wait(tmp_p
     assert reopened.is_dir() and _locked(repo, str(reopened))
 
 
-def test_keeps_a_closed_pr_worktree_with_local_changes(tmp_path):
+def test_salvages_and_removes_a_closed_pr_worktree_with_local_changes(tmp_path):
     repo, state, config = _project(tmp_path)
     dirty = _add(repo, state, "pr_worktrees", "dirty", age=time.time())
     (dirty / "new.txt").write_text("work")
 
     result = pr_worktree_gc.sweep(config, force=True, platform=_Platform({"dirty": "CLOSED"}))
 
-    assert result == {"removed": [], "kept": {str(dirty): "local changes"}}
+    assert result == {"removed": [str(dirty)], "kept": {}}
+    assert not dirty.exists()
+    assert _git(repo, "show", f"{_salvaged(repo, 'pr/dirty')}:new.txt") == "work"
+
+
+def test_salvages_an_idle_closed_pr_worktree_and_keeps_an_idle_open_one(tmp_path):
+    repo, state, config = _project(tmp_path)
+    dirty = _add(repo, state, "pr_worktrees", "dirty")
+    (dirty / "new.txt").write_text("work")
+    local = _add(repo, state, "pr_worktrees", "local")
+    (local / "new.txt").write_text("open work")
+
+    result = pr_worktree_gc.sweep(config, force=True,
+                                  platform=_Platform({"dirty": "CLOSED", "local": "OPEN"}))
+
+    assert result == {"removed": [str(dirty)], "kept": {str(local): "local changes"}}
+    assert _git(repo, "show", f"{_salvaged(repo, 'pr/dirty')}:new.txt") == "work"
+    assert (local / "new.txt").read_text() == "open work"
+    assert _locked(repo, str(local))
+
+
+def test_a_dry_run_reports_a_salvageable_closed_pr_worktree_as_removable(tmp_path):
+    repo, state, config = _project(tmp_path)
+    dirty = _add(repo, state, "pr_worktrees", "dirty", age=time.time())
+    (dirty / "new.txt").write_text("work")
+
+    result = pr_worktree_gc.sweep(config, dry_run=True, platform=_Platform({"dirty": "CLOSED"}))
+
+    assert result == {"removed": [str(dirty)], "kept": {}}
     assert (dirty / "new.txt").read_text() == "work"
-    assert _locked(repo, str(dirty))
 
 
 def test_keeps_a_recent_worktree_whose_branch_has_no_pr(tmp_path):
