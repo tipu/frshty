@@ -69,6 +69,14 @@ def _add(repo, state, sub, branch, age=OLD):
     return path
 
 
+def _salvaged(repo, label):
+    """The single salvage ref of `label` in `repo`."""
+    refs = _git(repo, "for-each-ref", "--format=%(refname)",
+                git_util.salvage_ref(label)).split()
+    assert len(refs) == 1, refs
+    return refs[0]
+
+
 def _locked(repo, path):
     for lines in git_util.worktree_entries(repo) or []:
         if lines[0] == f"worktree {path}":
@@ -225,7 +233,7 @@ def test_salvages_and_removes_a_closed_pr_worktree_with_local_changes(tmp_path):
 
     assert result == {"removed": [str(dirty)], "kept": {}}
     assert not dirty.exists()
-    assert _git(repo, "show", f"{git_util.salvage_ref('pr/dirty')}:new.txt") == "work"
+    assert _git(repo, "show", f"{_salvaged(repo, 'pr/dirty')}:new.txt") == "work"
 
 
 def test_salvages_an_idle_closed_pr_worktree_and_keeps_an_idle_open_one(tmp_path):
@@ -239,7 +247,7 @@ def test_salvages_an_idle_closed_pr_worktree_and_keeps_an_idle_open_one(tmp_path
                                   platform=_Platform({"dirty": "CLOSED", "local": "OPEN"}))
 
     assert result == {"removed": [str(dirty)], "kept": {str(local): "local changes"}}
-    assert _git(repo, "show", f"{git_util.salvage_ref('pr/dirty')}:new.txt") == "work"
+    assert _git(repo, "show", f"{_salvaged(repo, 'pr/dirty')}:new.txt") == "work"
     assert (local / "new.txt").read_text() == "open work"
     assert _locked(repo, str(local))
 

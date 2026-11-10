@@ -92,6 +92,13 @@ def _item(state: str, days: float, archived: bool = False) -> int:
     return item_id
 
 
+def _salvaged(repo, label):
+    refs = _git(repo, "for-each-ref", "--format=%(refname)",
+                git_util.salvage_ref(label)).split()
+    assert len(refs) == 1, refs
+    return refs[0]
+
+
 def _listed(ws, path: Path) -> bool:
     return any(lines[0] == f"worktree {path}"
                for lines in git_util.worktree_entries(ws.repo) or [])
@@ -136,11 +143,37 @@ class TestEnded:
 
         assert results[0]["kept"] == ""
         assert not wt.exists()
-        ref = git_util.salvage_ref("tickets/t-3-done/workspace/app")
+        ref = _salvaged(ws.repo, "tickets/t-3-done/workspace/app")
         assert _git(ws.repo, "show", f"{ref}:a.txt") == "edited"
         assert _git(ws.repo, "show", f"{ref}:b.txt") == "committed"
         assert _git(ws.repo, "show", f"{ref}:c.txt") == "untracked"
         assert _git(ws.repo, "rev-parse", f"{ref}^") == _git(ws.repo, "rev-parse", "t-3-done")
+
+    def test_a_second_salvage_of_the_same_folder_keeps_the_first(self, ws):
+        _ticket("t-9-again", "done", 2)
+        folder = _folder(ws, "t-9-again", "t-9-again")
+        (folder / "workspace" / "app" / "first.txt").write_text("1")
+        ticket_gc.sweep(force=True)
+        wt = folder / "workspace" / "app"
+        _git(ws.repo, *git_util.WORKTREE_ADD, str(wt), "t-9-again")
+        (wt / "second.txt").write_text("2")
+
+        ticket_gc.sweep(force=True)
+
+        refs = _git(ws.repo, "for-each-ref", "--format=%(refname)",
+                    git_util.salvage_ref("tickets/t-9-again/workspace/app")).split()
+        assert len(refs) == 2
+        assert sorted(_git(ws.repo, "ls-tree", "--name-only", r) for r in refs) == [
+            ".gitignore\na.txt\nfirst.txt", ".gitignore\na.txt\nsecond.txt"]
+
+    def test_a_ticket_with_an_open_terminal_stays(self, ws, monkeypatch):
+        _ticket("t-10-term", "done", 2)
+        folder = _folder(ws, "t-10-term", "t-10-term")
+        monkeypatch.setattr(ticket_gc.terminal, "session_healthy",
+                            lambda key, agent="claude": {"alive": key == "T-10-TERM"})
+
+        assert ticket_gc.sweep(force=True) == []
+        assert (folder / "workspace" / "app" / "a.txt").exists()
 
     def test_a_ticket_that_ended_today_stays(self, ws):
         _ticket("t-4-fresh", "merged", 0.1)
@@ -277,6 +310,29 @@ class TestKeeps:
         assert "HEAD is on no remote branch" in results[0]["kept"]
         assert (clone / ".git").is_dir()
 
+    @pytest.mark.parametrize("extra", ["branch", "stash", "worktree"])
+    def test_a_clone_with_work_off_its_head_keeps_the_folder(self, ws, tmp_path, extra):
+        folder = ws.tickets / f"DEV-7-{extra}"
+        folder.mkdir()
+        clone = folder / "app"
+        _git(tmp_path, "clone", str(tmp_path / "app.git"), str(clone))
+        ident = ("-c", "user.name=t", "-c", "user.email=t@t")
+        if extra == "branch":
+            _git(clone, "switch", "-c", "feature")
+            _git(clone, *ident, "commit", "--allow-empty", "-m", "local only")
+            _git(clone, "switch", "main")
+        elif extra == "stash":
+            (clone / "a.txt").write_text("stashed\n")
+            _git(clone, *ident, "stash")
+        else:
+            _git(clone, "worktree", "add", "-b", "side", str(tmp_path / "side"))
+        _age(folder, 30)
+
+        results = ticket_gc.sweep(force=True)
+
+        assert len(results) == 1 and results[0]["kept"]
+        assert (clone / ".git").is_dir()
+
     def test_a_pushed_clean_clone_is_deleted(self, ws, tmp_path):
         folder = ws.tickets / "DEV-6-clone"
         folder.mkdir()
@@ -285,6 +341,21 @@ class TestKeeps:
 
         assert [r["kept"] for r in ticket_gc.sweep(force=True)] == [""]
         assert not folder.exists()
+
+    def test_a_closed_pr_style_salvage_refuses_a_quoted_nested_repository(self, ws, tmp_path):
+        wt = tmp_path / "wt"
+        _git(ws.repo, "worktree", "add", "-b", "quoted", str(wt))
+        nested = wt / "my clone"
+        nested.mkdir()
+        _git(nested, "init", "-b", "main")
+        (nested / "x.txt").write_text("x")
+        _git(nested, "add", "x.txt")
+        _git(nested, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "x")
+
+        reason = git_util.release_worktree(ws.repo, wt, salvage_label="pr/quoted")
+
+        assert "nested repository" in reason
+        assert (nested / ".git").is_dir()
 
     def test_an_untracked_nested_repository_keeps_the_worktree(self, ws):
         _ticket("t-8-nested", "done", 2)

@@ -89,25 +89,53 @@ def _main_checkout(tree: Path) -> str:
     return os.path.dirname(common) if os.path.basename(common) == ".git" else common
 
 
-def _release(folder: Path, tree: Path) -> str:
+def _clone_loss(clone: Path) -> str:
+    """What deleting a standalone clone would lose, "" when nothing: a local
+    change, a commit of any ref that no remote branch holds, such as another
+    branch, a stash or a salvage ref, or a linked worktree."""
+    loss = git_util.worktree_loss(clone)
+    if loss:
+        return loss
+    local = git_util.run_git_status(clone, ["rev-list", "--max-count=1", "--all",
+                                            "--not", "--remotes"], timeout=120)
+    if local.returncode != 0:
+        return f"git rev-list failed: {local.stderr.strip()[:200]}"
+    if local.stdout.strip():
+        return "a ref holds a commit that no remote branch holds"
+    linked = git_util.worktree_entries(clone)
+    if linked is None:
+        return "git worktree list failed"
+    if linked:
+        return "the clone has a linked worktree"
+    return ""
+
+
+def _release(folder: Path, tree: Path, still_idle) -> str:
     """Remove one git tree of `folder`. "" when it is gone, else the reason
     it stays."""
     if (tree / ".git").is_dir():
-        loss = git_util.worktree_loss(tree)
+        loss = _clone_loss(tree)
         if loss:
-            return f"a clone that would lose its {loss}"
+            return f"a clone that would lose this: {loss}"
+        if not still_idle():
+            return "used during the sweep"
         shutil.rmtree(tree)
         return ""
     repo = _main_checkout(tree)
     if not repo:
         return "git cannot name the repository of the worktree"
     label = f"tickets/{folder.name}/{tree.relative_to(folder).as_posix()}"
-    return git_util.release_worktree(repo, tree, salvage_label=label)
+    return git_util.release_worktree(repo, tree, still_idle=still_idle, salvage_label=label)
 
 
-def _busy(folder: Path) -> int | None:
-    """The id of an unfinished work item whose run works inside `folder`,
-    None when there is none."""
+def _busy(folder: Path) -> str:
+    """What still works in `folder`, "" when nothing: a ticket terminal of a
+    ticket the folder belongs to, or a run of an unfinished work item or of
+    one with a live session."""
+    for row in db.query_all("SELECT DISTINCT ticket_key FROM tickets WHERE slug = ?",
+                            (folder.name,)):
+        if terminal.session_healthy(row["ticket_key"]).get("alive"):
+            return f"the terminal of {row['ticket_key']} is open"
     inside = str(folder).rstrip(os.sep) + os.sep
     rows = db.query_all(
         "SELECT DISTINCT r.work_item_id, r.cwd, i.state, i.archived_at FROM work_runs r "
@@ -117,17 +145,20 @@ def _busy(folder: Path) -> int | None:
         if row["cwd"] != str(folder) and not (row["cwd"] or "").startswith(inside):
             continue
         if disk_usage._in_use(dict(row)):
-            return row["work_item_id"]
+            return f"work item {row['work_item_id']} is not finished"
         if terminal.session_healthy(f"work-{row['work_item_id']}").get("alive"):
-            return row["work_item_id"]
-    return None
+            return f"work item {row['work_item_id']} has a live session"
+    return ""
 
 
 def release_trees(folder: Path) -> str:
     """Remove every git tree of `folder`. "" when all are gone, else the
-    reason the first one that stays gives."""
+    reason the first one that stays gives. Each removal asks _busy again
+    after its checks, so a terminal or a run that starts during the sweep
+    keeps the tree."""
+    still_idle = lambda: not _busy(folder)
     for tree in _git_trees(folder):
-        reason = _release(folder, tree)
+        reason = _release(folder, tree, still_idle)
         if reason:
             return f"{tree}: {reason}"
     return ""
@@ -209,7 +240,7 @@ def sweep_tickets(instance_key: str, config: dict, now: float, orphans: bool) ->
         kept = ""
         try:
             with work_store.launch_lock:
-                if _busy(folder) is not None:
+                if _busy(folder):
                     continue
                 if verdict[0] == "ended" and _verdict(name, folder, instance_key,
                                                       now, False) != verdict:

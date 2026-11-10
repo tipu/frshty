@@ -291,7 +291,9 @@ def salvage_ref(label: str) -> str:
 
 def salvage_worktree(worktree, label: str, timeout: int = 60) -> tuple[str, str]:
     """Record what a removal of `worktree` would lose in one commit, under
-    salvage_ref(label) in the worktree's repository.
+    salvage_ref(label)/<commit> in the worktree's repository. The commit in
+    the name keeps an earlier salvage of the same label, and update-ref
+    refuses to replace a ref that exists.
 
     The commit holds every tracked and untracked file that .gitignore does not
     exclude, and its parent is HEAD, so the branch, its unpushed commits and
@@ -304,12 +306,12 @@ def salvage_worktree(worktree, label: str, timeout: int = 60) -> tuple[str, str]
     git_dir, _ = git_dirs(worktree)
     if not git_dir:
         return "", "git cannot name the admin directory"
-    status = run_git_status(worktree, ["--no-optional-locks", "status", "--porcelain",
+    status = run_git_status(worktree, ["--no-optional-locks", "status", "--porcelain", "-z",
                                        "--untracked-files=all"], timeout=timeout)
     if status.returncode != 0:
         return "", f"git status failed: {status.stderr.strip()[:200]}"
-    nested = [ln[3:] for ln in status.stdout.splitlines()
-              if ln.startswith("?? ") and ln.endswith("/")]
+    nested = [rec[3:] for rec in status.stdout.split("\0")
+              if rec.startswith("?? ") and rec.endswith("/")]
     if nested:
         return "", f"an untracked nested repository: {nested[0][:200]}"
     staged = run_git_status(worktree, ["ls-files", "--stage"], timeout=timeout)
@@ -326,6 +328,11 @@ def salvage_worktree(worktree, label: str, timeout: int = 60) -> tuple[str, str]
                                   env=env)
             if step.returncode != 0:
                 return "", f"git {args[0]} failed: {step.stderr.strip()[:200]}"
+        gitlinks = run_git_status(worktree, ["ls-files", "--stage"], timeout=timeout, env=env)
+        if gitlinks.returncode != 0:
+            return "", f"git ls-files failed: {gitlinks.stderr.strip()[:200]}"
+        if any(ln.startswith("160000 ") for ln in gitlinks.stdout.splitlines()):
+            return "", "the worktree holds a nested repository"
         tree = run_git_status(worktree, ["write-tree"], timeout=max(timeout, SALVAGE_TIMEOUT),
                               env=env)
         if tree.returncode != 0:
@@ -335,7 +342,9 @@ def salvage_worktree(worktree, label: str, timeout: int = 60) -> tuple[str, str]
                                 timeout=timeout, env=env)
         if commit.returncode != 0:
             return "", f"git commit-tree failed: {commit.stderr.strip()[:200]}"
-        updated = run_git_status(worktree, ["update-ref", ref, commit.stdout.strip()],
+        sha = commit.stdout.strip()
+        ref = f"{ref}/{sha}"
+        updated = run_git_status(worktree, ["update-ref", ref, sha, "0" * len(sha)],
                                  timeout=timeout)
         if updated.returncode != 0:
             return "", f"git update-ref failed: {updated.stderr.strip()[:200]}"
@@ -363,8 +372,9 @@ def release_worktree(repo_path, worktree, timeout: int = 60, still_idle=None,
     worktree_loss decides what would be lost. With `salvage_label`, a loss in
     SALVAGEABLE_LOSSES is first recorded by salvage_worktree and the worktree
     is then removed with --force; a salvage_worktree_ref event names the ref.
-    `still_idle`, when given, is asked again after the unlock, so a writer
-    that took the worktree after the first check keeps it. Plain `git worktree
+    `still_idle`, when given, is asked again after the unlock and again after
+    a salvage, so a writer that took the worktree after the first check keeps
+    it. Plain `git worktree
     remove` checks the files again, so a file written in between keeps the
     worktree, and the lock goes back on. Returns "" when the worktree is gone,
     else the reason it stays."""
@@ -381,6 +391,8 @@ def release_worktree(repo_path, worktree, timeout: int = 60, still_idle=None,
                        else ("", ""))
         if failed:
             reason = f"{loss}; the salvage failed: {failed}"
+        elif ref and still_idle is not None and not still_idle():
+            reason = f"used during the sweep; the salvage stays at {ref}"
         else:
             remove = [*WORKTREE_REMOVE] if loss else ["worktree", "remove"]
             removed = run_git_status(repo_path, [*remove, str(worktree)], timeout=timeout)
