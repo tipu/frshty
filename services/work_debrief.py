@@ -10,7 +10,7 @@ import core.correspondence as correspondence
 import core.db as db
 import core.llm as llm
 import core.log as log
-from services import (claude_config, dir_slim, disk_usage, work_artifacts,
+from services import (claude_config, dir_slim, disk_usage, ticket_gc, work_artifacts,
                       work_ci_wait, work_launch, work_store, work_tickets,
                       work_worktree)
 
@@ -604,6 +604,10 @@ def _scan_loop():
             dir_slim.sweep()
         except Exception as e:
             log.emit("dir_slim_error", f"{type(e).__name__}: {e}")
+        try:
+            ticket_gc.sweep()
+        except Exception as e:
+            log.emit("ticket_gc_error", f"{type(e).__name__}: {e}")
         try:
             for gone in work_worktree.gc():
                 log.emit("work_worktree_gc",
