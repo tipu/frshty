@@ -10,8 +10,24 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _stop_started_runtime():
+    """Stop the worker pool, dispatcher, beat and cron threads a test started.
+
+    These threads poll whatever database core.db points at. Left running, they
+    hold a connection to the fresh database of a later test while its
+    migrations run, and the `PRAGMA journal_mode = WAL` there fails with
+    "database is locked"."""
+    yield
+    rt = sys.modules.get("core.runtime")
+    if rt is not None and (rt._pool or rt._dispatcher or rt._beat):
+        rt.stop_events()
 
 
 def _install_single_instance_config(tmp_path):
