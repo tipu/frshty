@@ -172,6 +172,22 @@ def _isolated_db(tmp_path_factory):
     _SESSION_MIGRATIONS_DIR = None
 
 
+def _drop_pending_usage() -> None:
+    """Drop the usage counters an earlier test recorded and did not flush.
+
+    services.usage counts requests in memory, and its usage-flush thread
+    writes them to whatever database core.db points at about five seconds
+    later. Counters left by one test land in the next test's fresh database
+    while its migrations run, and the `PRAGMA journal_mode = WAL` there fails
+    with "database is locked". Taking the flush lock also waits out a flush
+    that is already writing."""
+    usage = sys.modules.get("services.usage")
+    if usage is None:
+        return
+    with usage._flush_lock, usage._pending_lock:
+        usage._pending.clear()
+
+
 @pytest.fixture(autouse=True)
 def _restore_session_db(_isolated_db):
     """Some legacy tests (test_billing_preview, test_scheduler_beat,
@@ -198,6 +214,7 @@ def _restore_session_db(_isolated_db):
             db.execute(f"DELETE FROM {t}")
         except Exception:
             pass
+    _drop_pending_usage()
     # Re-inject the session db/state module references into modules that
     # cache them at import-time (features.tickets in particular, since
     # hardening tests patch attributes via `features.tickets.state`).
