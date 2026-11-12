@@ -3,6 +3,7 @@ import os
 import shlex
 import threading
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Request, WebSocket
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
@@ -140,7 +141,8 @@ def api_work_todo_add(body: dict):
         return JSONResponse({"error": "todo text is empty"}, status_code=400)
     with _todo_lock:
         items = _todo_items()
-        items.append({"id": uuid.uuid4().hex, "text": text})
+        items.append({"id": uuid.uuid4().hex, "text": text,
+                      "created_at": datetime.now(timezone.utc).isoformat()})
         state.save(TODO_KV_KEY, {"items": items})
     return {"items": items}
 
