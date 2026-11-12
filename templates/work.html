@@ -286,6 +286,7 @@
         <div class="ln-card-head">Todo</div>
         <div class="ln-todo-row" v-for="t in todos" :key="t.id">
           <span class="ln-todo-text">{{ t.text }}</span>
+          <span class="ln-muted ln-small" v-if="t.created_at" :title="t.created_at">{{ ago(t.created_at) }}</span>
           <button class="ln-btn ln-btn-sm ln-btn-ghost" title="remove this item" @click="removeTodo(t)">×</button>
         </div>
         <form class="ln-card-body" @submit.prevent="addTodo">

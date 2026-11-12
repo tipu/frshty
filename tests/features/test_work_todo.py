@@ -1,4 +1,5 @@
 import pathlib
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -25,6 +26,12 @@ class TestTodoApi:
         assert [it["text"] for it in r.json()["items"]] == ["call home"]
         assert [it["text"] for it in client.get("/api/work/todo").json()["items"]] == ["call home"]
 
+    def test_new_items_carry_a_creation_time(self, tmp_state):
+        before = datetime.now(timezone.utc)
+        item = _client().post("/api/work/todo", json={"text": "buy milk"}).json()["items"][0]
+        stamp = datetime.fromisoformat(item["created_at"])
+        assert before <= stamp <= datetime.now(timezone.utc) + timedelta(seconds=1)
+
     def test_empty_text_is_refused(self, tmp_state):
         r = _client().post("/api/work/todo", json={"text": "   "})
         assert r.status_code == 400
@@ -40,6 +47,7 @@ class TestTodoUi:
         assert board.index(">Todo</div>") < board.index("Active threads")
         assert "this.loadTodos()" in board
         assert "removeTodo(t)" in board
+        assert "ago(t.created_at)" in board
 
 
 class TestArtifactFavoritesApi:
