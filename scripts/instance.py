@@ -92,6 +92,14 @@ An optional [container] block in the instance config tunes the container:
     devices = ["/dev/kvm"]                   # host devices passed through
     env_file = "~/.frshty-containers/apexco.env"  # extra variables, e.g. BILLCOM_*
     slack_int = "~/slack_int"                # slack_int checkout; default ~/Documents/dev/slack_int
+
+An optional home in the [llm.codex] block names a codex home directory that
+the container sees at ~/.codex in place of the shared one, so the instance
+runs codex on its own login, config and sessions. A mount of auth.json alone
+does not hold: codex replaces auth.json by rename on every save.
+
+    [llm.codex]
+    home = "~/.frshty-containers/apexco/codex"
 """
 import argparse
 import fcntl
@@ -365,9 +373,12 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
         out.append((str(root / "aws"), str(HOME / ".aws"), False))
     workspace = _expand(config["workspace"]["root"])
     out.append((str(workspace), str(workspace), False))
+    codex_home = ((config.get("llm") or {}).get("codex") or {}).get("home")
+    homes = {".codex": _expand(codex_home)} if codex_home else {}
     for name in MODEL_DIRS:
-        if (HOME / name).is_dir():
-            out.append((str(HOME / name), str(HOME / name), False))
+        source = homes.get(name, HOME / name)
+        if name in homes or source.is_dir():
+            out.append((str(source), str(HOME / name), False))
     agy = HOME / ".local" / "bin" / "agy"
     if agy.is_file():
         out.append((str(agy), "/usr/local/bin/agy", True))

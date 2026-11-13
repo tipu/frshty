@@ -143,6 +143,23 @@ def test_claude_config_dir_is_mounted_and_named_for_the_aliases(host, tmp_path):
     assert instance.claude_config_dir(config(slack, workspace)) is None
 
 
+def test_codex_home_replaces_the_shared_codex_dir(host, tmp_path, monkeypatch):
+    slack, root, workspace, config_path = host
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    monkeypatch.setattr(instance, "HOME", home)
+    own = tmp_path / "team-codex"
+    c = config(slack, workspace, llm={"codex": {"home": str(own)}})
+    with pytest.raises(SystemExit):
+        instance.mounts(c, config_path, root)
+    own.mkdir()
+    binds = instance.mounts(c, config_path, root)
+    assert (str(own), str(home / ".codex"), False) in binds
+    assert not any(source == str(home / ".codex") for source, _, _ in binds)
+    shared = instance.mounts(config(slack, workspace), config_path, root)
+    assert (str(home / ".codex"), str(home / ".codex"), False) in shared
+
+
 def test_opencode_binary_and_state_are_mounted_only_when_installed(host, tmp_path, monkeypatch):
     slack, root, workspace, config_path = host
     home = tmp_path / "home"
