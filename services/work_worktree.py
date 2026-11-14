@@ -983,9 +983,14 @@ def gc_untracked(now: datetime | None = None) -> list[dict]:
         if os.path.basename(common) != ".git":
             continue
         repo_path = os.path.dirname(common)
-        if _git(repo_path, ["fetch", "--prune", "origin",
-                            "+refs/heads/*:refs/remotes/origin/*"], timeout=120).returncode != 0:
+        fetched = _git(repo_path, ["fetch", "--prune", "origin",
+                                   "+refs/heads/*:refs/remotes/origin/*"], timeout=120)
+        fault = {"work_item_id": item_id, "path": path,
+                 "repo_name": os.path.basename(repo_path)}
+        if fetched.returncode != 0:
+            _report_fault(fault, fetched.stderr or "", "git fetch origin fails")
             continue
+        _reported_faults.discard(path)
         with work_store.launch_lock:
             if _untracked_keep_reason(path, repo_path):
                 continue
