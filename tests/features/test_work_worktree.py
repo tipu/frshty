@@ -1183,3 +1183,120 @@ class TestGc:
         assert seen == {"at_entry": True, "at_exit": True}
         assert released.is_set()
         assert not os.path.isdir(row["path"])
+
+
+def agent_worktree(tmp_path, root, item_id, project="", push=True,
+                   reason=git_util.WORKTREE_LOCK_REASON):
+    """A worktree an agent added itself under the task root, with no row."""
+    repo = make_repo(tmp_path)
+    path = root / project / f"work-{item_id}" / "app"
+    path.parent.mkdir(parents=True)
+    _git(repo, "worktree", "add", "-b", "agent-branch", str(path), "main")
+    (path / "change.txt").write_text("work\n")
+    _git(path, "add", "-A")
+    _git(path, "-c", "user.name=t", "-c", "user.email=t@e.com", "commit", "-m", "work")
+    if push:
+        _git(path, "push", "-u", "origin", "agent-branch")
+    if reason:
+        _git(repo, "worktree", "lock", "--reason", reason, str(path))
+    return repo, path
+
+
+class TestGcUntracked:
+    def test_removes_a_clean_pushed_worktree_archived_long_ago(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        repo, path = agent_worktree(tmp_path, wt_root, item_id)
+        _finish(item_id, days_ago=work_worktree.KEEP_FINISHED_DAYS + 1)
+        assert work_worktree.untracked_worktrees() == [(item_id, str(path))]
+        gone = work_worktree.gc_untracked()
+        assert [g["path"] for g in gone] == [str(path)]
+        assert not os.path.lexists(path.parent)
+        assert "agent-branch" not in _git(repo, "branch", "--list").stdout
+        assert str(path) not in _git(repo, "worktree", "list").stdout
+
+    def test_finds_a_worktree_under_a_project_folder(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id, project="proj")
+        assert work_worktree.untracked_worktrees() == [(item_id, str(path))]
+
+    def test_keeps_a_worktree_archived_recently(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id)
+        _finish(item_id, days_ago=work_worktree.KEEP_FINISHED_DAYS - 1)
+        assert work_worktree.gc_untracked() == []
+        assert path.is_dir()
+
+    def test_keeps_a_worktree_of_an_item_that_is_not_archived(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id)
+        _finish(item_id, archived=False, days_ago=30)
+        assert work_worktree.gc_untracked() == []
+        assert path.is_dir()
+
+    def test_keeps_a_worktree_whose_branch_origin_does_not_hold(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id, push=False)
+        _finish(item_id, days_ago=30)
+        assert work_worktree.gc_untracked() == []
+        assert path.is_dir()
+
+    def test_keeps_a_worktree_whose_branch_origin_deleted(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        repo, path = agent_worktree(tmp_path, wt_root, item_id)
+        _git(repo, "config", "remote.origin.fetch", "+refs/heads/main:refs/remotes/origin/main")
+        _git(tmp_path, "--git-dir", str(tmp_path / "app.git"), "branch", "-D", "agent-branch")
+        _finish(item_id, days_ago=30)
+        assert work_worktree.gc_untracked() == []
+        assert path.is_dir()
+
+    def test_keeps_a_worktree_with_an_uncommitted_file(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        repo, path = agent_worktree(tmp_path, wt_root, item_id)
+        (path / "draft.txt").write_text("unsaved\n")
+        _finish(item_id, days_ago=30)
+        assert work_worktree.gc_untracked() == []
+        assert (path / "draft.txt").exists()
+        locked = _git(repo, "worktree", "list", "--porcelain").stdout
+        assert f"locked {git_util.WORKTREE_LOCK_REASON}" in locked
+
+    def test_keeps_a_worktree_with_an_ignored_env_file(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id)
+        (path / ".gitignore").write_text(".env\n")
+        _git(path, "add", "-A")
+        _git(path, "-c", "user.name=t", "-c", "user.email=t@e.com", "commit", "-m", "ignore")
+        _git(path, "push")
+        (path / ".env").write_text("SECRET=1\n")
+        _finish(item_id, days_ago=30)
+        assert work_worktree.gc_untracked() == []
+        assert (path / ".env").exists()
+
+    def test_keeps_a_worktree_another_owner_locked(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id, reason="mine")
+        _finish(item_id, days_ago=30)
+        assert work_worktree.gc_untracked() == []
+        assert path.is_dir()
+
+    def test_removes_an_unlocked_worktree(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id, reason="")
+        _finish(item_id, days_ago=30)
+        assert [g["path"] for g in work_worktree.gc_untracked()] == [str(path)]
+        assert not path.exists()
+
+    def test_keeps_a_worktree_with_a_live_session(self, tmp_path, wt_root, monkeypatch):
+        item_id = _item("agent made a worktree")
+        _, path = agent_worktree(tmp_path, wt_root, item_id)
+        _finish(item_id, days_ago=30)
+        monkeypatch.setattr(work_worktree.terminal, "session_healthy",
+                            lambda key, agent="claude": {"alive": True})
+        assert work_worktree.gc_untracked() == []
+        assert path.is_dir()
+
+    def test_skips_a_worktree_a_row_names(self, tmp_path, wt_root, monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("frshty made a worktree")
+        work_worktree.ensure(item_id, _spec(repo), "frshty made a worktree")
+        assert work_worktree.untracked_worktrees() == []

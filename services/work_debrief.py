@@ -605,7 +605,7 @@ def _scan_loop():
         except Exception as e:
             log.emit("dir_slim_error", f"{type(e).__name__}: {e}")
         try:
-            for gone in work_worktree.gc():
+            for gone in work_worktree.gc() + work_worktree.gc_untracked():
                 log.emit("work_worktree_gc",
                          f"removed task worktree {gone['path']}")
         except Exception as e:
