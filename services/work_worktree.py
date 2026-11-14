@@ -30,6 +30,8 @@ from services import work_store
 GIT_TIMEOUT = 120
 BRANCH_CANDIDATES = 9
 KEEP_FINISHED_DAYS = 7
+UNTRACKED_DEPTH = 4
+TASK_FOLDER = re.compile(r"work-(\d+)")
 MEDIA_SUFFIXES = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".bmp", ".ico",
     ".tif", ".tiff", ".heic", ".heif", ".psd", ".raw", ".cr2", ".nef", ".dng",
@@ -878,4 +880,133 @@ def gc(now: datetime | None = None) -> list[dict]:
             if _remove(row):
                 removed.append({"id": row["id"], "path": row["path"],
                                 "result": "removed"})
+    return removed
+
+
+def untracked_worktrees() -> list[tuple[int, str]]:
+    """Every git worktree under the task worktree root that no live
+    work_worktrees row names, with the id of the work-N folder above it.
+
+    An agent that runs `git worktree add` itself, such as one launched in a
+    shared checkout, leaves a worktree that `gc` and dir_slim never read. The
+    walk stops at a worktree, at a symlink and at UNTRACKED_DEPTH levels
+    below the root, so it never descends into a dependency tree."""
+    root = core_config.TASK_WORKTREE_ROOT
+    if root.is_symlink() or not root.is_dir():
+        return []
+    tracked = {os.path.realpath(r["path"]) for r in db.query_all(
+        "SELECT path FROM work_worktrees WHERE removed_at IS NULL")}
+    found = []
+    for top, dirs, _ in os.walk(root):
+        parts = Path(top).relative_to(root).parts
+        if os.path.isfile(os.path.join(top, ".git")):
+            dirs[:] = []
+            ids = [int(m.group(1)) for m in map(TASK_FOLDER.fullmatch, parts) if m]
+            if ids and os.path.realpath(top) not in tracked:
+                found.append((ids[-1], top))
+            continue
+        if len(parts) >= UNTRACKED_DEPTH:
+            dirs[:] = []
+            continue
+        dirs[:] = sorted(d for d in dirs if not os.path.islink(os.path.join(top, d)))
+    return found
+
+
+def untracked_ready(item_id: int, path: str, now: datetime, days: int) -> bool:
+    """Whether every work item that ran in an untracked worktree was archived
+    `days` ago and has no live session. The work-N item counts even when no
+    run recorded the path, because its agent made the worktree."""
+    for used in _items_using({"id": 0, "work_item_id": item_id, "path": path}):
+        item = db.query_one("SELECT archived_at FROM work_items WHERE id = ?", (used,))
+        if item is None or not item["archived_at"]:
+            return False
+        try:
+            archived = datetime.fromisoformat(item["archived_at"])
+        except ValueError:
+            return False
+        if archived.tzinfo is None:
+            archived = archived.replace(tzinfo=timezone.utc)
+        if now - archived < timedelta(days=days):
+            return False
+        if terminal.session_healthy(f"work-{used}").get("alive"):
+            return False
+    return True
+
+
+def _untracked_keep_reason(path: str, repo_path: str) -> str:
+    """Why an untracked worktree must stay before its lock comes off, "" when
+    it may go. A lock with another reason than frshty's keeps it."""
+    link_fault = _link_fault(path)
+    if link_fault:
+        return f"the git link is broken: {link_fault}"
+    status = _git(path, ["-c", "status.showUntrackedFiles=all", "-c", "core.quotePath=true",
+                         "status", "--porcelain", "--ignored"], timeout=60)
+    if status.returncode != 0:
+        return f"status failed: {(status.stderr or '').strip()[:200]}"
+    entries = [e for e in status.stdout.splitlines() if e]
+    if any(not e.startswith("!! ") for e in entries):
+        return "the worktree holds uncommitted files"
+    keepers = _ignored_keepers([e[3:].strip('"') for e in entries])
+    if keepers:
+        return f"the worktree holds ignored files to keep: {', '.join(keepers[:5])}"
+    held = _git(path, ["for-each-ref", "--count=1", "--contains", "HEAD",
+                       "refs/remotes/origin"], timeout=30)
+    if held.returncode != 0 or not held.stdout.strip():
+        return "origin does not hold HEAD"
+    real = os.path.realpath(path)
+    for lines in git_util.worktree_entries(repo_path) or []:
+        if os.path.realpath(lines[0][len("worktree "):].strip()) != real:
+            continue
+        locks = [ln for ln in lines if ln == "locked" or ln.startswith("locked ")]
+        if not locks:
+            _git(repo_path, ["worktree", "lock", "--reason",
+                             git_util.WORKTREE_LOCK_REASON, path], timeout=30)
+        elif locks != [f"locked {git_util.WORKTREE_LOCK_REASON}"]:
+            return f"another owner locked it: {locks[0][:200]}"
+        return ""
+    return "the repository does not list it"
+
+
+def gc_untracked(now: datetime | None = None) -> list[dict]:
+    """Remove the untracked task worktrees whose work items were archived
+    KEEP_FINISHED_DAYS ago, when the tree is clean and origin holds its HEAD.
+    `release_worktree` unlocks it and runs a plain `git worktree remove`,
+    which refuses a modified, untracked or submodule tree. Returns the
+    worktrees removed."""
+    now = now or datetime.now(timezone.utc)
+    removed: list[dict] = []
+    root = os.path.realpath(core_config.TASK_WORKTREE_ROOT)
+    for item_id, path in untracked_worktrees():
+        if not untracked_ready(item_id, path, now, KEEP_FINISHED_DAYS):
+            continue
+        _, common = git_util.git_dirs(path)
+        if os.path.basename(common) != ".git":
+            continue
+        repo_path = os.path.dirname(common)
+        if _git(repo_path, ["fetch", "--prune", "origin",
+                            "+refs/heads/*:refs/remotes/origin/*"], timeout=120).returncode != 0:
+            continue
+        with work_store.launch_lock:
+            if _untracked_keep_reason(path, repo_path):
+                continue
+            head = _git(path, ["rev-parse", "--abbrev-ref", "HEAD"], timeout=30)
+            reason = git_util.release_worktree(
+                repo_path, path,
+                still_idle=lambda: untracked_ready(item_id, path, now, KEEP_FINISHED_DAYS))
+            if reason:
+                log.emit("work_worktree_remove_failed",
+                         f"work item {item_id}: {path}: {reason[:200]}")
+                continue
+            branch = head.stdout.strip()
+            if head.returncode == 0 and branch and branch != "HEAD":
+                _git(repo_path, ["branch", "-d", branch])
+            parent = os.path.dirname(path)
+            while os.path.realpath(parent).startswith(root + os.sep):
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    break
+                parent = os.path.dirname(parent)
+        removed.append({"id": None, "work_item_id": item_id, "path": path,
+                        "result": "removed"})
     return removed

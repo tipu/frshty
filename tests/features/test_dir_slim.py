@@ -12,7 +12,7 @@ import pytest
 import core.db as db
 from services import dir_slim, work_worktree
 from tests.features.test_work_worktree import (_finish, _git, _item, _spec,
-                                               make_repo, wt_root)
+                                               agent_worktree, make_repo, wt_root)
 
 DAY = 86400
 OLD = dir_slim.SLIM_AFTER_DAYS + 1
@@ -124,6 +124,27 @@ class TestTasks:
         _, tree = _task(tmp_path, monkeypatch, OLD)
         dir_slim._last_sweep = time.time()
         assert dir_slim.sweep() == []
+        assert (tree / "node_modules").is_dir()
+
+
+class TestUntrackedTasks:
+    def test_slims_a_worktree_an_agent_added_once_archived_long_ago(self, tmp_path,
+                                                                    wt_root):
+        item_id = _item("agent made a worktree")
+        _, tree = agent_worktree(tmp_path, wt_root, item_id)
+        _bulk(tree)
+        _finish(item_id, days_ago=OLD)
+        results = dir_slim.sweep(force=True)
+        assert [r["path"] for r in results] == [str(tree)]
+        assert not (tree / "node_modules").exists()
+        assert (tree / "change.txt").exists()
+
+    def test_keeps_a_worktree_an_agent_added_archived_recently(self, tmp_path, wt_root):
+        item_id = _item("agent made a worktree")
+        _, tree = agent_worktree(tmp_path, wt_root, item_id)
+        _bulk(tree)
+        _finish(item_id, days_ago=dir_slim.SLIM_AFTER_DAYS - 1)
+        assert dir_slim.sweep(force=True) == []
         assert (tree / "node_modules").is_dir()
 
 
