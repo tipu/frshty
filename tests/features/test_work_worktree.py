@@ -1249,6 +1249,21 @@ class TestGcUntracked:
         assert work_worktree.gc_untracked() == []
         assert path.is_dir()
 
+    def test_reports_a_failed_fetch_once_and_keeps_the_worktree(self, tmp_path, wt_root,
+                                                                 monkeypatch):
+        item_id = _item("agent made a worktree")
+        repo, path = agent_worktree(tmp_path, wt_root, item_id)
+        _git(repo, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
+        _finish(item_id, days_ago=30)
+        emitted = []
+        monkeypatch.setattr(work_worktree.log, "emit",
+                            lambda event, summary, **kw: emitted.append(event))
+        monkeypatch.setattr(work_worktree, "_reported_faults", set())
+        assert work_worktree.gc_untracked() == []
+        assert work_worktree.gc_untracked() == []
+        assert emitted == ["work_worktree_fault"]
+        assert path.is_dir()
+
     def test_keeps_a_worktree_with_an_uncommitted_file(self, tmp_path, wt_root):
         item_id = _item("agent made a worktree")
         repo, path = agent_worktree(tmp_path, wt_root, item_id)
