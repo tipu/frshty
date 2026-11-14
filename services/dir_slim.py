@@ -29,6 +29,7 @@ import re
 import shutil
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import core.config as core_config
@@ -219,6 +220,23 @@ def slim_tasks(now: float) -> list[dict]:
     return results
 
 
+def slim_untracked(now: float) -> list[dict]:
+    """Slim every task worktree no work_worktrees row names, such as one an
+    agent added itself, once its work items were archived SLIM_AFTER_DAYS
+    ago."""
+    when = datetime.fromtimestamp(now, timezone.utc)
+    results = []
+    for item_id, path in work_worktree.untracked_worktrees():
+        if not work_worktree.untracked_ready(item_id, path, when, SLIM_AFTER_DAYS):
+            continue
+        with work_store.launch_lock:
+            if not work_worktree.untracked_ready(item_id, path, when, SLIM_AFTER_DAYS):
+                continue
+            result = slim(Path(path), core_config.TASK_WORKTREE_ROOT)
+        results.append({"path": path, **result})
+    return results
+
+
 def _slim_idle(folder: Path, base: Path, now: float) -> dict | None:
     """Slim `folder` when no file outside SLIM_DIRS in it changed for
     SLIM_AFTER_DAYS. None when nothing qualifies."""
@@ -292,7 +310,7 @@ def sweep(now: float | None = None, force: bool = False) -> list[dict]:
         if not force and now - _last_sweep < SWEEP_INTERVAL_S:
             return []
         _last_sweep = now
-        results = slim_tasks(now)
+        results = slim_tasks(now) + slim_untracked(now)
         instances = runtime.instances()
         for reg in instances.all() if instances else []:
             if (reg.config.get("features") or {}).get("tickets"):
