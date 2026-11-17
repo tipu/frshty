@@ -87,8 +87,8 @@ class TestCadence:
 class TestSweep:
     def test_changed_asks_start_one_triage_task_and_one_task_per_ticket(self):
         launcher = _Launcher()
-        out = _sweep([_ask("slack:C1:1.0", "slack"), _ask("pr:heatreally#5", "own_pr"),
-                      _ask("linear:ENG-1", "ticket")], launcher)
+        out = _sweep([_ask("slack:C1:1.0", "slack"), _ask("pr:prepanware#5", "own_pr"),
+                      _ask("ticket:ENG-1", "ticket")], launcher)
         assert len(out["started"]) == 2
         objectives = [c["objective"] for c in launcher.calls]
         assert objectives[0].startswith("Autopilot: develop ENG-1")
@@ -120,11 +120,11 @@ class TestSweep:
         assert len(resumed.calls) == 1
 
     def test_ticket_tasks_respect_the_cap_and_never_double_up_on_a_ticket(self):
-        _sweep([_ask("linear:ENG-1", "ticket"), _ask("linear:ENG-2", "ticket")], _Launcher())
-        assert [r["ask_key"] for r in autopilot.runs(KEY)] == ["linear:ENG-1"]
+        _sweep([_ask("ticket:ENG-1", "ticket"), _ask("ticket:ENG-2", "ticket")], _Launcher())
+        assert [r["ask_key"] for r in autopilot.runs(KEY)] == ["ticket:ENG-1"]
         again = _Launcher()
-        _sweep([_ask("linear:ENG-1", "ticket", fingerprint="2"),
-                _ask("linear:ENG-2", "ticket")], again)
+        _sweep([_ask("ticket:ENG-1", "ticket", fingerprint="2"),
+                _ask("ticket:ENG-2", "ticket")], again)
         assert again.calls == []
 
     def test_a_failed_launch_keeps_the_error_and_retries_the_asks_next_sweep(self):
@@ -144,10 +144,10 @@ class TestSweep:
 
     def test_a_source_that_fails_does_not_stop_the_others(self):
         with patch.object(autopilot, "slack_asks", side_effect=RuntimeError("down")), \
-                patch.object(autopilot, "pr_asks", return_value=[_ask("pr:heatreally#5", "own_pr")]), \
+                patch.object(autopilot, "pr_asks", return_value=[_ask("pr:prepanware#5", "own_pr")]), \
                 patch.object(autopilot, "ticket_asks", return_value=[]):
             asks, errors = autopilot.collect(CONFIG, KEY, NOW)
-        assert [a["key"] for a in asks] == ["pr:heatreally#5"]
+        assert [a["key"] for a in asks] == ["pr:prepanware#5"]
         assert errors == ["slack: RuntimeError: down"]
 
 
@@ -217,13 +217,13 @@ def test_the_api_lists_runs_with_their_notes():
     _sweep([_ask("slack:C1:1.0", "slack")], _Launcher())
     run_id = autopilot.runs(KEY)[0]["id"]
     db.execute("INSERT INTO autopilot_notes(run_id, ts, text) VALUES (?, ?, ?)",
-               (run_id, NOW.isoformat(), "reviewed heatreally#5"))
+               (run_id, NOW.isoformat(), "reviewed prepanware#5"))
     app = FastAPI()
     app.include_router(web_autopilot.router)
     with patch.dict(web_autopilot._config, CONFIG, clear=True):
         body = TestClient(app).get("/api/autopilot").json()
     assert body["enabled"] is True
-    assert body["runs"][0]["notes"][0]["text"] == "reviewed heatreally#5"
+    assert body["runs"][0]["notes"][0]["text"] == "reviewed prepanware#5"
     assert body["runs"][0]["asks"][0]["key"] == "slack:C1:1.0"
 
 
@@ -240,7 +240,7 @@ class TestTicketAsks:
         asks = self._asks(tmp_path, [{"key": "ENG-7", "summary": "a"},
                                      {"key": "ENG-8", "summary": "b"},
                                      {"key": "ENG-9", "summary": "c"}])
-        assert [a["key"] for a in asks] == ["linear:ENG-8", "linear:ENG-9"]
+        assert [a["key"] for a in asks] == ["ticket:ENG-8", "ticket:ENG-9"]
         assert "Recorded stage: tests_failed" in asks[0]["detail"]
 
     def test_the_autopilot_stage_wins_over_the_pipeline_status(self, tmp_path):
@@ -252,12 +252,21 @@ class TestTicketAsks:
 
 
 def test_both_briefs_carry_the_safety_rules():
-    ask = _ask("linear:ENG-1", "ticket")
-    for brief in (autopilot.triage_brief(3, [_ask("pr:heatreally#5", "own_pr")]),
+    ask = _ask("ticket:ENG-1", "ticket")
+    for brief in (autopilot.triage_brief(3, [_ask("pr:prepanware#5", "own_pr")]),
                   autopilot.ticket_brief(3, ask)):
         for rule in autopilot.SAFETY_RULES:
             assert rule in brief
         assert f"autopilot_note.py 3 " in brief
+
+
+def test_the_briefs_name_no_service_and_defer_to_the_workspace_claude_md():
+    ask = _ask("ticket:ENG-1", "ticket")
+    for brief in (autopilot.triage_brief(3, [_ask("pr:prepanware#5", "own_pr")]),
+                  autopilot.ticket_brief(3, ask)):
+        assert "the workspace CLAUDE.md names" in brief
+        for service in ("Linear", "GitHub", "Guidepost", "Jira", "Bitbucket"):
+            assert service not in brief
 
 
 def test_tickets_stay_with_the_pipeline_when_it_is_on():

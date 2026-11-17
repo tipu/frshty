@@ -146,7 +146,7 @@ pr_autofix = false                # github only: every PR the instance account o
 # [autopilot]                     # a sweep that reads what changed for the operator and starts
 # enabled = false                 # the agents that handle it. Slack threads that involve the
 # interval_minutes = 30           # operator and the operator's pull requests go to one triage
-# jitter_minutes = 7              # task per sweep; each assigned Linear issue gets a ticket task
+# jitter_minutes = 7              # task per sweep; each assigned ticket gets a ticket task
 # max_tickets = 1                 # that runs every ticket pipeline stage with the pipeline's own
 #                                 # prompts, without the ticket state machine. Each sweep fires
 #                                 # interval_minutes after the last, moved up to jitter_minutes
