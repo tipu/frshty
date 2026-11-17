@@ -18,6 +18,7 @@
 		{ title: 'Work', links: [
 			{ href: '/standup', label: 'Standup', icon: '☀' },
 			{ href: '/tasks', label: 'Tasks', icon: '◈', match: ['/tasks', '/threads'] },
+			{ href: '/autopilot', label: 'Autopilot', icon: '◆' },
 			{ href: '/reviews', label: 'Reviews', icon: '◐' },
 			{ href: '/today', label: 'Today', icon: '☉' },
 			{ href: '/wizard', label: 'Wizard', icon: '✦' },
@@ -57,6 +58,7 @@
 		'/standup': ['Work', 'Standup'],
 		'/tasks': ['Work', 'Tasks'],
 		'/threads': ['Work', 'Tasks', 'Threads'],
+		'/autopilot': ['Work', 'Autopilot'],
 		'/reviews': ['Work', 'Reviews'],
 		'/today': ['Work', 'Today'],
 		'/wizard': ['Work', 'Wizard'],

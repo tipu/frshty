@@ -139,6 +139,11 @@ def scheduled_page():
     return _template("scheduled.html")
 
 
+@router.get("/autopilot", response_class=HTMLResponse)
+def autopilot_page():
+    return _template("autopilot.html")
+
+
 @router.get("/config", response_class=HTMLResponse)
 def config_page():
     return _template("config.html")

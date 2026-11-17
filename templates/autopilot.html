@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Autopilot — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
+<style>
+.badge-triage { background: #1e3a5f; color: #93c5fd; }
+.badge-ticket { background: #3b2a5f; color: #c4b5fd; }
+.badge-error { background: #5f1e1e; color: #fca5a5; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" width="wide">
+
+<div class="max-w-3xl">
+    <div class="text-sm text-gray-400 mb-4">
+        <template v-if="!status.enabled">Autopilot is off. Set <code>[autopilot] enabled = true</code> in the instance config.</template>
+        <template v-else>
+            Sweeps {{ status.cadence }}.
+            <template v-if="status.next_run_at">Next sweep {{ fmtDate(status.next_run_at) }} ({{ relTime(status.next_run_at) }}).</template>
+            <template v-if="status.last_run_at">Last sweep {{ relTime(status.last_run_at) }}.</template>
+        </template>
+    </div>
+
+    <div v-if="!runs.length" class="text-gray-500 text-sm">Autopilot has not started anything yet.</div>
+    <div v-else class="grid gap-3">
+        <div v-for="run in runs" :key="run.id" class="card p-4">
+            <div class="flex items-center gap-2 mb-1 flex-wrap">
+                <span class="badge" :class="run.kind === 'ticket' ? 'badge-ticket' : 'badge-triage'">{{ run.kind }}</span>
+                <span class="font-bold text-sm">run {{ run.id }}</span>
+                <span class="text-xs text-gray-400">{{ fmtDate(run.started_at) }} ({{ relTime(run.started_at) }})</span>
+                <a v-if="run.work_item_id" :href="`/tasks/${run.work_item_id}`" class="link text-xs">task {{ run.work_item_id }}</a>
+                <span v-if="run.item_state" class="text-xs text-gray-500">{{ run.item_state }}</span>
+                <span v-if="run.error" class="badge badge-error">launch failed</span>
+            </div>
+            <div v-if="run.error" class="text-xs text-red-300 mt-1">{{ run.error }}</div>
+            <ul class="text-xs text-gray-400 mt-2">
+                <li v-for="ask in run.asks" :key="ask.key">
+                    <a v-if="ask.url" :href="ask.url" target="_blank" class="link">{{ ask.title }}</a>
+                    <span v-else>{{ ask.title }}</span>
+                </li>
+            </ul>
+            <div v-if="run.notes.length" class="mt-2 border-t border-gray-800 pt-2">
+                <div v-for="(n, i) in run.notes" :key="i" class="text-sm text-gray-200">
+                    <span class="text-xs text-gray-500">{{ fmtTime(n.ts) }}</span> {{ n.text }}
+                </div>
+            </div>
+            <div v-if="run.checkpoint" class="text-xs text-gray-500 mt-2">{{ run.checkpoint }}</div>
+        </div>
+    </div>
+</div>
+
+</frshty-shell>
+</div>
+
+<script>
+const { ref, onMounted } = Vue;
+
+frshtyApp({
+    setup() {
+        const runs = ref([]);
+        const status = ref({});
+        const features = ref({});
+        const instanceName = ref('');
+
+        function relTime(iso) {
+            const diff = new Date(iso) - Date.now();
+            const mins = Math.floor(Math.abs(diff) / 60000);
+            const hrs = Math.floor(mins / 60);
+            const label = hrs > 0 ? `${hrs}h ${mins % 60}m` : `${mins}m`;
+            return diff > 0 ? `in ${label}` : `${label} ago`;
+        }
+        function fmtDate(iso) {
+            return new Date(iso).toLocaleDateString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+            });
+        }
+        function fmtTime(iso) {
+            return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+        }
+
+        async function load() {
+            try {
+                const [r1, r2] = await Promise.all([fetch('/api/autopilot'), fetch('/api/config')]);
+                const data = await r1.json();
+                status.value = data;
+                runs.value = data.runs || [];
+                const cfg = await r2.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) { console.error('autopilot load failed', e); }
+        }
+
+        onMounted(() => {
+            load();
+            setInterval(load, 15000);
+        });
+
+        return { runs, status, features, instanceName, relTime, fmtDate, fmtTime };
+    },
+}).mount('#app');
+</script>
+</body>
+</html>
