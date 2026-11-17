@@ -17,6 +17,7 @@ Both kinds surface together on /scheduled sorted by run_at.
 """
 from __future__ import annotations
 import random
+import re
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Callable
@@ -25,6 +26,9 @@ import core.db as db
 import core.log as log
 import core.state as state
 import core.tz as core_tz
+
+
+_JITTER_CADENCE = re.compile(r"every_(\d+)m_jitter_(\d+)m")
 
 
 def _now_iso() -> str:
@@ -264,6 +268,15 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
         while candidate.astimezone(timezone.utc) <= now:
             candidate = candidate + timedelta(days=1)
         return candidate
+
+    jittered = _JITTER_CADENCE.fullmatch(cadence)
+    if jittered:
+        minutes, spread = int(jittered.group(1)), int(jittered.group(2))
+        if minutes <= 0:
+            return prev_run_at + timedelta(hours=1)
+        spread = min(spread, minutes - 1)
+        offset = random.uniform(-spread * 60, spread * 60)
+        return now + timedelta(seconds=minutes * 60 + offset)
 
     if cadence.startswith("every_") and cadence.endswith("m"):
         try:

@@ -15,6 +15,7 @@ SKIP_EXACT = frozenset({
     "/api/config",
     "/api/status",
     "/api/scheduled",
+    "/api/autopilot",
     "/api/usage/ui",
     "/api/usage/report",
 })

@@ -26,6 +26,7 @@ from web.upwork import router as _upwork_router
 from web.timesheet import router as _timesheet_router
 from web.billing import router as _billing_router
 from web.scheduling import router as _scheduling_router
+from web.autopilot import router as _autopilot_router
 from web.prd import router as _prd_router
 from web.manager import router as _manager_router
 from web.today import router as _today_router
@@ -64,6 +65,7 @@ app.include_router(_upwork_router)
 app.include_router(_timesheet_router)
 app.include_router(_billing_router)
 app.include_router(_scheduling_router)
+app.include_router(_autopilot_router)
 app.include_router(_prd_router)
 app.include_router(_manager_router)
 app.include_router(_today_router)

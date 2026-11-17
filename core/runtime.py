@@ -28,6 +28,7 @@ from core.beat import BeatThread
 from core.event_bus import Dispatcher
 from core.registry import Instances
 from core.worker import WorkerPool
+import features.autopilot as autopilot
 from services import live_check, memory_history, work_dream
 
 DEFAULT_DB_PATH = db_path()
@@ -599,6 +600,14 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         cadence=cadence, next_run_at=candidate)
         else:
             scheduler.delete(key, "today_agent_tick")
+        if autopilot.enabled(c):
+            existing = scheduler.run_at(key, "autopilot_sweep")
+            next_run = existing if existing is not None and existing > now_pst else \
+                autopilot.first_run_at(c, now_pst)
+            scheduler.upsert_recurring(key, "autopilot_sweep", "autopilot_sweep",
+                                       cadence=autopilot.cadence(c), next_run_at=next_run)
+        else:
+            scheduler.delete(key, "autopilot_sweep")
         retention = now_pst.replace(hour=3, minute=0, second=0, microsecond=0)
         if retention <= now_pst:
             retention += timedelta(days=1)
