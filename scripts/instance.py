@@ -450,6 +450,15 @@ def docker_socket_gid() -> str:
     return r.stdout.strip()
 
 
+def gvoice_channel(config: dict) -> str:
+    """The browser gvoice launches. The image installs Google Chrome only on
+    amd64, so another architecture falls back to Playwright's Chromium."""
+    configured = (config.get("direct_inbox") or {}).get("gvoice_chrome_channel")
+    if configured:
+        return str(configured)
+    return "chrome" if platform.machine().lower() in ("x86_64", "amd64") else "chromium"
+
+
 def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     key = config["job"]["key"]
     box = config.get("container") or {}
@@ -479,6 +488,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"FRSHTY_WORKER_COUNT={int(box.get('workers') or 3)}",
             "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}",
             "-e", f"GVOICE_PROFILE_DIR={root / 'state' / GVOICE_PROFILE}",
+            "-e", f"GVOICE_CHROME_CHANNEL={gvoice_channel(config)}",
             "--memory", memory, "--memory-swap", memory,
             "--tmpfs", TMP_MOUNT]
     if claude_config_dir(config):
@@ -534,7 +544,7 @@ def gvoice_login_args(config: dict) -> list[str]:
             "-v", f"{X11_SOCKETS}:{X11_SOCKETS}:ro",
             "-v", f"{xauth}:/run/frshty/xauthority:ro",
             "-e", f"GVOICE_PROFILE_DIR={profile}",
-            "-e", f"GVOICE_CHROME_CHANNEL={settings.get('gvoice_chrome_channel') or 'chrome'}",
+            "-e", f"GVOICE_CHROME_CHANNEL={gvoice_channel(config)}",
             "-v", f"{profile}:{profile}",
             "-w", GVOICE_DIR,
             "--entrypoint", "node", IMAGE, "--input-type=module", "-e", GVOICE_LOGIN_JS]

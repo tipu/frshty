@@ -393,6 +393,7 @@ class TestInstanceLauncher:
 
     def test_gvoice_login_shares_the_instance_profile(self, tmp_path, monkeypatch):
         mod, home = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "machine", lambda: "x86_64")
         path = self._config(tmp_path)
         config = mod.load(str(path))
         run = mod.run_args(config, path, check=False)
@@ -408,6 +409,7 @@ class TestInstanceLauncher:
         assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in run
         assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in args
         assert "GVOICE_CHROME_CHANNEL=chrome" in args
+        assert "GVOICE_CHROME_CHANNEL=chrome" in run
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
         assert f"{state / 'gvoice'}:{state / 'gvoice'}" in volumes
         assert (state / "gvoice").is_dir()
@@ -443,6 +445,15 @@ class TestInstanceLauncher:
         config["direct_inbox"] = {"gvoice_profile_dir": str(tmp_path / "elsewhere")}
         with pytest.raises(SystemExit, match="outside"):
             mod.gvoice_login_args(config)
+
+    def test_gvoice_uses_chromium_where_the_image_has_no_chrome(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "machine", lambda: "aarch64")
+        path = self._config(tmp_path)
+        config = mod.load(str(path))
+        assert "GVOICE_CHROME_CHANNEL=chromium" in mod.run_args(config, path, check=False)
+        config["direct_inbox"] = {"gvoice_chrome_channel": "chrome-beta"}
+        assert "GVOICE_CHROME_CHANNEL=chrome-beta" in mod.run_args(config, path, check=False)
 
     def test_gvoice_login_needs_a_display(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
