@@ -601,8 +601,8 @@ def api_work_discuss_start(item_id: int, restart: bool = False):
         "SELECT path, note FROM work_artifacts WHERE work_item_id = ? ORDER BY id",
         (item_id,))
     worktree = work_worktree.for_item(item_id)
-    cwd = next((r["cwd"] for r in reversed(runs) if r["cwd"] and os.path.isdir(r["cwd"])),
-               "") or str(work_artifacts.item_dir(item_id))
+    cwd = (worktree["path"] if worktree and os.path.isdir(worktree["path"])
+           else str(work_artifacts.item_dir(item_id)))
     key = f"discuss-{item_id}"
     if restart:
         terminal.kill_terminal(key)

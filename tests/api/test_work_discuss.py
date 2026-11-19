@@ -1,6 +1,6 @@
 import os
 
-from services import work_store
+from services import work_artifacts, work_store
 from tests.api.test_artifact_file import _artifact
 from web import work as work_routes
 
@@ -31,19 +31,30 @@ class TestDiscussRoute:
         monkeypatch.setattr(work_routes, "schedule_discuss_kill", scheduled.append)
         return launched, scheduled
 
-    def test_launches_claude_in_the_run_cwd_with_task_run_and_artifacts(self, tmp_path, monkeypatch):
+    def test_launches_claude_in_the_artifact_folder_with_task_run_and_artifacts(self, tmp_path, monkeypatch):
         item_id, run_cwd, report = _seed(tmp_path)
         launched, scheduled = self._stub(tmp_path, monkeypatch)
         resp = work_routes.api_work_discuss_start(item_id)
         key = f"discuss-{item_id}"
         assert resp["key"] == key
-        assert [(k, cwd) for k, cwd, _ in launched] == [(key, str(run_cwd))]
+        assert [(k, cwd) for k, cwd, _ in launched] == [
+            (key, str(work_artifacts.item_dir(item_id)))]
         assert "--append-system-prompt" in launched[0][2]
         seed = (tmp_path / "launch" / f"{key}.md").read_text()
         assert "discuss route test" in seed
         assert str(report) in seed
         assert f"cwd {run_cwd}" in seed
         assert scheduled == [key]
+
+    def test_launches_claude_in_the_task_worktree(self, tmp_path, monkeypatch):
+        item_id, _, _ = _seed(tmp_path)
+        launched, _ = self._stub(tmp_path, monkeypatch)
+        tree = tmp_path / "worktree"
+        tree.mkdir()
+        monkeypatch.setattr(work_routes.work_worktree, "for_item",
+                            lambda i: {"path": str(tree), "branch": "work-1"})
+        work_routes.api_work_discuss_start(item_id)
+        assert [cwd for _, cwd, _ in launched] == [str(tree)]
 
     def test_keeps_a_running_session(self, tmp_path, monkeypatch):
         item_id, _, _ = _seed(tmp_path)
