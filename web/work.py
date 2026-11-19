@@ -543,6 +543,84 @@ def task_terminal_page(item_id: int):
     return _fresh(_template("work_terminal.html"))
 
 
+@router.get("/tasks/{item_id}/discuss", response_class=HTMLResponse)
+def task_discuss_page(item_id: int):
+    return _fresh(_template("work_discuss.html"))
+
+
+def _discuss_context(item: dict, runs: list[dict], artifacts: list[dict],
+                     worktree: dict | None) -> str:
+    lines = [
+        f"The operator opened this session from the board to discuss work item "
+        f"{item['id']}. Answer questions about the task, its run and the "
+        "artifacts it created. Read the transcript and the artifacts before you "
+        "answer a question about them. This session is not the task's agent: "
+        "do not change the task's worktree unless the operator asks.",
+        "",
+        f"Objective: {item['objective'] or ''}",
+        f"State: {item['state'] or ''}",
+    ]
+    if item.get("current_checkpoint"):
+        lines.append(f"Checkpoint: {item['current_checkpoint']}")
+    if item.get("stop_reason"):
+        lines.append(f"Stop reason: {item['stop_reason']}")
+    if item.get("summary"):
+        lines += ["", "Summary:", item["summary"]]
+    if worktree:
+        lines += ["", f"Worktree: {worktree['path']} on branch {worktree['branch']}"]
+    lines += ["", "Runs:"]
+    for run in runs:
+        lines.append(
+            f"- run {run['id']}: provider {run['provider'] or 'claude'}, "
+            f"started {run['started_at'] or ''}, cwd {run['cwd'] or ''}, "
+            f"transcript {work_store.resolve_transcript_path(run) or 'none'}")
+    if not runs:
+        lines.append("- none")
+    lines += ["", "Artifacts:"]
+    for a in artifacts:
+        lines.append(f"- {a['path']}" + (f" — {a['note']}" if a["note"] else ""))
+    if not artifacts:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+@router.post("/api/work/items/{item_id}/discuss/start")
+def api_work_discuss_start(item_id: int, restart: bool = False):
+    item = db.query_one(
+        "SELECT id, objective, state, summary, current_checkpoint, stop_reason "
+        "FROM work_items WHERE id = ?", (item_id,))
+    if not item:
+        return JSONResponse({"error": "unknown work item"}, status_code=404)
+    config = work_launch.personal_config()
+    if config is None:
+        return JSONResponse({"error": "personal instance not loaded"}, status_code=409)
+    runs = db.query_all(
+        "SELECT id, provider, cwd, transcript_path, started_at, agent_session_id "
+        "FROM work_runs WHERE work_item_id = ? ORDER BY id", (item_id,))
+    artifacts = db.query_all(
+        "SELECT path, note FROM work_artifacts WHERE work_item_id = ? ORDER BY id",
+        (item_id,))
+    worktree = work_worktree.for_item(item_id)
+    cwd = next((r["cwd"] for r in reversed(runs) if r["cwd"] and os.path.isdir(r["cwd"])),
+               "") or str(work_artifacts.item_dir(item_id))
+    key = f"discuss-{item_id}"
+    if restart:
+        terminal.kill_terminal(key)
+    if not terminal.session_healthy(key)["agent_running"]:
+        ctx_path = terminal.launch_context_path(
+            key, _discuss_context(item, runs, artifacts, worktree))
+        try:
+            terminal.launch_pane_command(
+                key, cwd,
+                f"{terminal.claude_cmd(config, cwd=cwd)} --append-system-prompt "
+                f"\"$(cat {shlex.quote(ctx_path)})\"")
+        except RuntimeError as e:
+            log.emit("work_discuss_failed", f"work item {item_id}: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    schedule_discuss_kill(key)
+    return {"status": "ok", "key": key, "cwd": cwd}
+
+
 @router.get("/work/{item_id}")
 def work_detail_page(item_id: int):
     return RedirectResponse(f"/tasks/{item_id}", status_code=308)

@@ -41,6 +41,15 @@
 .wsel { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #16161e; border: 1px solid #2a2a35; color: #d1d5db; }
 .art { font-family: monospace; font-size: 13px; color: #86efac; }
 .art img { display: block; max-width: 100%; max-height: 480px; border: 1px solid #2a2a35; border-radius: 8px; margin: 6px 0 12px; }
+body.discuss-open { padding-right: 50vw; }
+.discuss-panel { position: fixed; top: 0; right: 0; bottom: 0; width: 50vw; z-index: 40; display: flex; flex-direction: column;
+                 background: #0a0a0f; border-left: 1px solid #2a2a35; }
+.discuss-bar { flex: none; height: 34px; display: flex; align-items: center; gap: 12px; padding: 0 14px;
+               background: #0d0d13; border-bottom: 1px solid #2a2a35; font-size: 12px; color: #d5d5dc; }
+.discuss-bar button { background: none; border: 0; color: #93c5fd; font: inherit; cursor: pointer; padding: 0; }
+.discuss-bar button:hover { text-decoration: underline; }
+.discuss-panel iframe { flex: 1; min-height: 0; width: 100%; border: 0; }
+@media (max-width: 900px) { body.discuss-open { padding-right: 0; } .discuss-panel { width: 100vw; } }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -77,6 +86,9 @@
     <span class="ln-pill ln-pill-ghost ml-2" style="cursor:pointer" v-if="cancelable"
           title="stop this task and kill the terminal its agent runs in"
           @click="cancel()">⊘ Cancel</span>
+    <span class="ln-pill ln-pill-ghost ml-2" style="cursor:pointer"
+          title="open a Claude session beside this page that knows the task, its runs and its artifacts"
+          @click="toggleDiscuss()">{{ discussOpen ? '✕ Close discuss' : '💬 Discuss' }}</span>
     <span class="ln-pill ln-pill-ghost ml-2" v-if="item.archived_at"
           title="this task is in the archive, not on the board">Archived</span>
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span></span>
@@ -358,6 +370,14 @@
 </div>
   </div>
 </frshty-shell>
+<div class="discuss-panel" v-if="discussOpen">
+  <div class="discuss-bar">
+    <span style="flex:1">Discuss task #{{ item && item.id }}</span>
+    <button type="button" title="move this session into its own window" @click="popOutDiscuss()">pop out ↗</button>
+    <button type="button" title="hide the session; it keeps running" @click="toggleDiscuss()">close ✕</button>
+  </div>
+  <iframe :src="discussHref + (peer ? '&' : '?') + 'embed=1'"></iframe>
+</div>
 </div>
 <script>
 function showWorkFatal(error) {
@@ -390,7 +410,8 @@ const app = frshtyApp({
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
                     tagText: "", tagError: "", tagBusy: false,
-                    debriefBusy: false, debriefError: "", actError: "", approveBusy: false, proposalText: null, continueBusy: false, linkmap: null }; },
+                    debriefBusy: false, debriefError: "", actError: "", approveBusy: false, proposalText: null, continueBusy: false, linkmap: null,
+                    discussOpen: false }; },
   computed: {
     railCounts() {
       return { tasks: this.needsYou };
@@ -402,6 +423,9 @@ const app = frshtyApp({
     terminalHref() {
       if (!this.item) return "";
       return (this.peerBase || "") + "/tasks/" + this.item.id + "/terminal";
+    },
+    discussHref() {
+      return this.item ? this.taskHref(this.item.id, "/discuss") : "";
     },
     terminalWindow() {
       if (!this.item) return "_blank";
@@ -501,6 +525,14 @@ const app = frshtyApp({
     threadHref(rootId) {
       return "/threads/" + rootId +
              (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
+    },
+    toggleDiscuss() {
+      this.discussOpen = !this.discussOpen;
+      document.body.classList.toggle("discuss-open", this.discussOpen);
+    },
+    popOutDiscuss() {
+      window.open(this.discussHref, "discuss-" + (this.peer ? this.peer + "-" : "") + this.item.id);
+      this.toggleDiscuss();
     },
     artifactUrl(a) {
       return this.api("/api/work/artifact_file/" + a.id);

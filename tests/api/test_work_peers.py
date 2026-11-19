@@ -422,9 +422,11 @@ def peer_terminal():
 
 
 class TestPeerTerminalProxy:
-    def test_only_an_artifact_terminal_is_reachable(self, peers_file):
+    def test_only_an_artifact_or_discuss_terminal_is_reachable(self, peers_file):
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "https://10.0.0.2:7100"\n')
         assert work_peers.terminal_url("a", "artifact-12") == ("wss://10.0.0.2:7100/ws/terminal/artifact-12", "")
+        assert work_peers.terminal_url("a", "discuss-12") == ("wss://10.0.0.2:7100/ws/terminal/discuss-12", "")
+        assert work_peers.terminal_url("a", "discuss-12x")[1].startswith("peer terminal not allowed")
         assert work_peers.terminal_url("a", "work-12")[1] == "peer terminal not allowed: work-12"
         assert work_peers.terminal_url("a", "artifact-12-discuss")[1].startswith("peer terminal not allowed")
         assert work_peers.terminal_url("b", "artifact-12")[1] == "unknown peer 'b'"
