@@ -17,7 +17,7 @@ import core.log as log
 PEERS_PATH = Path(__file__).parent.parent / "config" / "peers.toml"
 ALLOWED_PREFIX = "api/work/"
 FILE_PREFIX = "api/work/artifact_file/"
-TERMINAL_KEY = re.compile(r"artifact-\d+")
+TERMINAL_KEY = re.compile(r"(artifact|discuss)-\d+")
 FILE_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges",
                 "content-disposition", "content-encoding", "content-security-policy",
                 "last-modified", "etag")
@@ -181,10 +181,12 @@ async def open_file(key: str, path: str, range_header: str = "",
 
 
 def terminal_url(key: str, term_key: str) -> tuple[str, str]:
-    """Turn a peer key and an artifact terminal key into the peer's websocket URL.
+    """Turn a peer key and an artifact or discuss terminal key into the peer's
+    websocket URL.
 
-    Only an artifact terminal is reachable. A ticket or task terminal on the
-    peer runs an agent with write access, and the viewer page never needs it."""
+    Only an artifact terminal or a task's discuss terminal is reachable. A
+    ticket or task terminal on the peer runs the working agent, and the viewer
+    and discuss pages never need it."""
     if not TERMINAL_KEY.fullmatch(term_key):
         return "", f"peer terminal not allowed: {term_key}"
     peer = find(key)
