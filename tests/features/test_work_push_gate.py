@@ -132,7 +132,7 @@ class TestGatePush:
         item_id, sid = _mkrun()
         self._resolve_to(monkeypatch, tmp_path)
         monkeypatch.setattr(work_launch.git_util, "lint_files",
-                            lambda repo, files: {"status": "hook_failed",
+                            lambda repo, files, *_: {"status": "hook_failed",
                                                  "exit_code": 1,
                                                  "output": "E501 line too long"})
         tests_called = []
@@ -153,7 +153,7 @@ class TestGatePush:
         item_id, sid = _mkrun()
         self._resolve_to(monkeypatch, tmp_path)
         monkeypatch.setattr(work_launch.git_util, "lint_files",
-                            lambda repo, files: {"status": "pass", "exit_code": 0,
+                            lambda repo, files, *_: {"status": "pass", "exit_code": 0,
                                                  "output": ""})
         monkeypatch.setattr(work_launch, "_detect_runner",
                             lambda repo, *_: (["bash", "-c", "echo 1 failed; exit 1"], {}))
@@ -169,7 +169,7 @@ class TestGatePush:
         item_id, sid = _mkrun()
         self._resolve_to(monkeypatch, tmp_path)
         monkeypatch.setattr(work_launch.git_util, "lint_files",
-                            lambda repo, files: {"status": "pass", "exit_code": 0,
+                            lambda repo, files, *_: {"status": "pass", "exit_code": 0,
                                                  "output": "ok"})
         monkeypatch.setattr(work_launch, "_detect_runner",
                             lambda repo, *_: (["bash", "-c", "exit 0"], {}))
@@ -186,7 +186,7 @@ class TestGatePush:
         work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
         self._resolve_to(monkeypatch, tmp_path)
         monkeypatch.setattr(work_launch.git_util, "lint_files",
-                            lambda repo, files: {"status": "pass", "exit_code": 0,
+                            lambda repo, files, *_: {"status": "pass", "exit_code": 0,
                                                  "output": ""})
         configs = {"apexco": {"workspace": {"test_ci_env": False}}}
         monkeypatch.setattr(work_launch, "_instance_config", configs.get)
@@ -221,7 +221,7 @@ class TestGatePush:
         item_id, sid = _mkrun()
         self._resolve_to(monkeypatch, tmp_path)
         monkeypatch.setattr(work_launch.git_util, "lint_files",
-                            lambda repo, files: {"status": "no_config",
+                            lambda repo, files, *_: {"status": "no_config",
                                                  "exit_code": 0, "output": ""})
         monkeypatch.setattr(work_launch, "_detect_runner",
                             lambda repo, *_: ([work_launch._NO_LOCAL_PY_VENV_SENTINEL], {}))
