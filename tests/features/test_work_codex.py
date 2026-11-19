@@ -238,6 +238,8 @@ class TestCodexLaunch:
         assert "end your turn with the line `waiting on PR #N checks`" in prompt
         assert "the board polls the checks and resumes you with the result" in prompt
         assert work_store.CI_WAIT_RE.search("waiting on PR #7 checks")
+        assert "write `waiting on owner/repo#N checks`" in prompt
+        assert work_store.CI_WAIT_RE.search("waiting on owner/repo#7 checks")
 
     def test_the_prompt_puts_the_question_file_on_stdin(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")

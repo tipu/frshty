@@ -1057,6 +1057,17 @@ class GitHubPlatform(_CIMonitorMixin):
                  meta={"repo": repo, "pr_id": pr_id, "returncode": result.returncode})
         return None
 
+    def pr_missing(self, repo: str, pr_id: int) -> bool:
+        """True only when GitHub answers that the pull request, or its
+        repository, does not exist; GitHub gives the same answer for a private
+        repository the gh account cannot see. False when it exists or the read
+        failed for another reason."""
+        result = self._run_gh(["pr", "view", str(pr_id), "--repo", self._resolve_repo(repo),
+                               "--json", "number"])
+        err = result.stderr or ""
+        return result.returncode != 0 and ("Could not resolve to a PullRequest" in err
+                                           or "Could not resolve to a Repository" in err)
+
     def get_failed_logs(self, repo: str, pr_id: int) -> str:
         full = self._resolve_repo(repo)
         checks = self.get_pr_checks(repo, pr_id) or []

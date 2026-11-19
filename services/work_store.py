@@ -32,7 +32,8 @@ BG_WAIT_RECHECK_MINUTES = 30
 BG_WAIT_REASON = "Waiting on a background task"
 PROCESS_START_SLACK = timedelta(seconds=5)
 CI_WAIT_RECHECK_HOURS = 6
-CI_WAIT_RE = re.compile(r"\bwaiting on PR #(\d+) checks\b", re.IGNORECASE)
+CI_WAIT_RE = re.compile(
+    r"\bwaiting on (?:PR |(?P<repo>[\w.-]+/[\w.-]+))#(?P<pr>\d+) checks\b", re.IGNORECASE)
 PROPOSED_STATE = "proposed"
 DECLINED_REASON = "Proposal declined"
 GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_external",
@@ -2408,18 +2409,20 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             return "question"
         ci_wait = CI_WAIT_RE.search(tail)
         if ci_wait:
-            pr = int(ci_wait.group(1))
+            pr = int(ci_wait.group("pr"))
+            repo = ci_wait.group("repo") or ""
             c.execute(
                 "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, "
                 "stop_reason = ?, updated_at = ? WHERE id = ?",
                 ((datetime.now(timezone.utc)
                   + timedelta(hours=CI_WAIT_RECHECK_HOURS)).isoformat(),
-                 f"Waiting on PR #{pr} checks", now, run["work_item_id"]),
+                 f"Waiting on {repo or 'PR '}#{pr} checks", now, run["work_item_id"]),
             )
             c.execute(
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'ci_wait', ?, ?)",
-                (run["work_item_id"], run["id"], db.dump_json({"pr": pr}), now),
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"pr": pr, "repo": repo} if repo else {"pr": pr}), now),
             )
             return "ci_wait"
         if bg_pending:

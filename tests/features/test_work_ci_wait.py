@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 import core.db as db
+from features.platforms import GitHubPlatform
 from services import work_ci_wait, work_store
 
 
@@ -31,20 +32,26 @@ def _events(item_id, kind):
 
 
 class _Checks:
-    def __init__(self, checks):
+    def __init__(self, checks, missing=False):
         self.checks = checks
+        self.missing = missing
         self.read = []
 
     def get_pr_checks(self, repo, pr_id):
         self.read.append((repo, pr_id))
         return self.checks
 
+    def pr_missing(self, repo, pr_id):
+        return self.missing
+
 
 @pytest.fixture
 def board(monkeypatch):
     state = {"checks": _Checks([]), "sent": [], "send_ok": True}
     monkeypatch.setattr(work_ci_wait, "_repo_slug", lambda cwd: "owner/repo")
-    monkeypatch.setattr(work_ci_wait, "_platform", lambda env_key, slug: state["checks"])
+    monkeypatch.setattr(work_ci_wait, "_platform",
+                        lambda env_key, slug: state.setdefault("slugs", []).append(slug)
+                        or state["checks"])
     monkeypatch.setattr(work_store, "tmux_send",
                         lambda key, text: state["sent"].append((key, text)) or state["send_ok"])
     return state
@@ -80,6 +87,12 @@ class TestTurnEnd:
         assert _item(item_id)["state"] == "waiting_external"
         assert work_store.maybe_autocontinue(sid, str(transcript)) == "not_applicable"
         assert len(_events(item_id, "ci_wait")) == 1
+
+    def test_a_wait_line_with_a_repository_keeps_the_repository(self):
+        item_id, outcome = _parked(tail="Pushed.\nwaiting on other-org/other.repo#7 checks")
+        assert outcome == "ci_wait"
+        assert _item(item_id)["stop_reason"] == "Waiting on other-org/other.repo#7 checks"
+        assert _events(item_id, "ci_wait") == [{"pr": 7, "repo": "other-org/other.repo"}]
 
     def test_a_turn_without_the_line_still_continues(self, monkeypatch):
         monkeypatch.setattr(work_store, "tmux_send", lambda key, text: True)
@@ -143,6 +156,32 @@ class TestSweep:
         [action] = _sweep(item_id, later)
         assert "still unknown" in action["result"]
 
+    def test_a_named_repository_is_read_instead_of_the_cwd_origin(self, board):
+        item_id, _ = _parked(tail="waiting on other-org/other#7 checks")
+        board["checks"] = _Checks([{"name": "test", "state": "SUCCESS"}])
+        [action] = _sweep(item_id)
+        assert action["ref"] == "other-org/other#7"
+        assert ("other-org/other", 7) in board["checks"].read
+        assert board["slugs"][-1] == "other-org/other"
+        [text] = _sent(board, item_id)
+        assert "checks of other-org/other#7" in text
+        assert "`waiting on other-org/other#7 checks`" in text
+        assert _events(item_id, "ci_wait_done") == [
+            {"pr": 7, "repo": "other-org/other", "result": "every check passed"}]
+
+    def test_a_missing_pull_request_resumes_the_agent_at_once(self, board):
+        item_id, _ = _parked(tail="waiting on other-org/other#7 checks")
+        board["checks"] = _Checks(None, missing=True)
+        [action] = _sweep(item_id)
+        assert action["result"].startswith("GitHub answered that other-org/other#7 does not exist")
+        assert _item(item_id)["state"] == "agent_working"
+
+    def test_an_unreadable_check_list_of_an_existing_pr_waits(self, board):
+        item_id, _ = _parked()
+        board["checks"] = _Checks(None, missing=False)
+        assert _sweep(item_id) == []
+        assert _item(item_id)["state"] == "waiting_external"
+
     def test_an_item_the_operator_took_back_is_left_alone(self, board):
         item_id, _ = _parked()
         with db.tx() as c:
@@ -167,3 +206,18 @@ class TestRepoSlug:
     def test_a_directory_without_an_origin_has_no_slug(self, tmp_path):
         assert work_ci_wait._repo_slug(str(tmp_path)) == ""
 
+
+
+class TestPrMissing:
+    @pytest.mark.parametrize("returncode,stderr,missing", [
+        (1, "GraphQL: Could not resolve to a PullRequest with the number of 9. "
+            "(repository.pullRequest)", True),
+        (1, "GraphQL: Could not resolve to a Repository with the name 'o/r'. (repository)", True),
+        (1, "HTTP 502: Bad Gateway", False),
+        (0, "", False),
+    ])
+    def test_reads_the_gh_answer(self, monkeypatch, returncode, stderr, missing):
+        platform = GitHubPlatform({"github": {"repo": "o/r"}, "workspace": {}})
+        monkeypatch.setattr(platform, "_run_gh", lambda args: subprocess.CompletedProcess(
+            args, returncode, stdout="", stderr=stderr))
+        assert platform.pr_missing("o/r", 9) is missing

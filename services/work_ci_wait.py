@@ -11,7 +11,10 @@ without spending a turn per poll.
 
 The checks are read with GitHubPlatform.get_pr_checks, under the gh account
 of the project the run was launched for, in the repository the run's working
-directory pushes to. A wait that sees no checks for CI_WAIT_NO_CHECKS_MINUTES,
+directory pushes to. A line `waiting on owner/repo#N checks` names another
+repository, and the ci_wait event keeps it as `repo`. When GitHub answers that
+the pull request does not exist, the agent is resumed with that fact on the
+same scan. A wait that sees no checks for CI_WAIT_NO_CHECKS_MINUTES,
 or no result for CI_WAIT_MAX_MINUTES, resumes the agent with that fact rather
 than holding it forever. A ci_wait_done event closes the wait; it is written
 only after the message reached the pane, so a failed send is tried again on
@@ -33,9 +36,9 @@ CI_WAIT_MAX_MINUTES = 120
 _REMOTE_SLUG = re.compile(r"[:/]([^/:]+)/([^/]+?)(?:\.git)?/?$")
 
 RESULT_PROMPT = (
-    work_store.BOARD_PROMPT_MARKER + " The board watched the checks of PR #{pr}. Result: {result}. "
+    work_store.BOARD_PROMPT_MARKER + " The board watched the checks of {ref}. Result: {result}. "
     "Continue the task from here. To wait on checks again, end your turn "
-    "with the line `waiting on PR #{pr} checks`."
+    "with the line `waiting on {ref} checks`."
 )
 
 
@@ -63,14 +66,20 @@ def _minutes_since(stamp: str, now: datetime) -> float:
     return (now - datetime.fromisoformat(stamp)).total_seconds() / 60
 
 
+def _ref(row: dict) -> str:
+    """How the agent named the pull request: `owner/repo#N` or `PR #N`."""
+    return f"{row['repo'] or 'PR '}#{row['pr']}"
+
+
 def _result(row: dict, now: datetime) -> str:
     """The result to give the agent, "" while the wait goes on."""
-    slug = _repo_slug(row["cwd"])
+    slug = row["repo"] or _repo_slug(row["cwd"])
     age = _minutes_since(row["waited_at"], now)
     if not slug:
         return ("the board could not read the GitHub repository of "
                 f"{row['cwd'] or 'this run'}, so it did not watch the checks")
-    checks = _platform(row["env_key"] or "", slug).get_pr_checks(slug, row["pr"])
+    platform = _platform(row["env_key"] or "", slug)
+    checks = platform.get_pr_checks(slug, row["pr"])
     summary = ci_summary(checks)
     if summary == "passing":
         return "every check passed"
@@ -80,6 +89,9 @@ def _result(row: dict, now: datetime) -> str:
         if age >= CI_WAIT_NO_CHECKS_MINUTES:
             return f"no checks were reported in {CI_WAIT_NO_CHECKS_MINUTES} minutes"
         return ""
+    if checks is None and platform.pr_missing(slug, row["pr"]):
+        return (f"GitHub answered that {slug}#{row['pr']} does not exist, "
+                "or that the gh account of this project cannot see it")
     if checks is None:
         log.emit("work_ci_wait_read_failed",
                  f"work item {row['item_id']}: the checks of {slug}#{row['pr']} "
@@ -103,14 +115,16 @@ def sweep_ci_waits(now: datetime | None = None) -> list[dict]:
         "WHERE d.work_run_id = r.id AND d.kind = 'ci_wait_done' AND d.id > e.id)")
     actions: list[dict] = []
     for row in rows:
-        row["pr"] = int(db.load_json(row, "payload").get("pr") or 0)
+        payload = db.load_json(row, "payload")
+        row["pr"] = int(payload.get("pr") or 0)
+        row["repo"] = payload.get("repo") or ""
         result = _result(row, now_dt)
         if not result:
             continue
         if not work_store.tmux_send(row["tmux_key"],
-                                    RESULT_PROMPT.format(pr=row["pr"], result=result)):
+                                    RESULT_PROMPT.format(ref=_ref(row), result=result)):
             log.emit("work_ci_wait_send_failed",
-                     f"work item {row['item_id']}: the result of PR #{row['pr']} "
+                     f"work item {row['item_id']}: the result of {_ref(row)} "
                      "did not reach the agent pane; the next scan tries again")
             continue
         stamp = work_store._now()
@@ -126,6 +140,8 @@ def sweep_ci_waits(now: datetime | None = None) -> list[dict]:
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'ci_wait_done', ?, ?)",
                 (row["item_id"], row["run_id"],
-                 db.dump_json({"pr": row["pr"], "result": result}), stamp))
-        actions.append({"id": row["item_id"], "pr": row["pr"], "result": result})
+                 db.dump_json({"pr": row["pr"], "repo": row["repo"], "result": result}
+                              if row["repo"] else {"pr": row["pr"], "result": result}), stamp))
+        actions.append({"id": row["item_id"], "pr": row["pr"], "ref": _ref(row),
+                        "result": result})
     return actions

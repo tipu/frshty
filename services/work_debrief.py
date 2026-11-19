@@ -635,7 +635,7 @@ def _scan_loop():
         try:
             for act in work_ci_wait.sweep_ci_waits():
                 log.emit("work_ci_wait_done",
-                         f"work item {act['id']}: PR #{act['pr']} checks: {act['result']}")
+                         f"work item {act['id']}: {act['ref']} checks: {act['result']}")
         except Exception as e:
             log.emit("work_ci_wait_error", f"{type(e).__name__}: {e}")
         try:
