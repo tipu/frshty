@@ -981,7 +981,8 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             "over 30 seconds, `gh pr checks --watch` and `gh run watch` are refused. "
             "To wait for the checks of a pull request, end your turn with the line "
             "`waiting on PR #N checks`, where N is the pull request number; the "
-            "board polls the checks and resumes you with the result. "
+            "board polls the checks and resumes you with the result. For a pull "
+            "request in another repository, write `waiting on owner/repo#N checks`. "
             "When you stop, state a one-line checkpoint that starts with `Checkpoint:`. "
             + work_store.PROGRESS_RULE + work_store.RUN_BUDGET_RULE
             + (work_store.LIVE_CHECK_RULE if live_check.enabled(config) else "")

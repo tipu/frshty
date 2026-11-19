@@ -1899,7 +1899,7 @@ class TestQuestions:
         work_store.CHECK_IN_PROMPT,
         work_store.BUDGET_SPENT_PROMPT,
         work_store.BG_WAIT_NUDGE_PROMPT.format(minutes=30, tasks="b2ms6zphy"),
-        work_ci_wait.RESULT_PROMPT.format(pr=7, result="all checks passed"),
+        work_ci_wait.RESULT_PROMPT.format(ref="PR #7", result="all checks passed"),
         work_launch.RESTART_CONTINUE_PROMPT,
         work_store.continue_prompt(),
     ])
