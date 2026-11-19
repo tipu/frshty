@@ -22,7 +22,7 @@ import core.log as log
 import core.runtime as runtime
 import core.terminal as terminal
 from core.tasks.tickets import (
-    TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
+    _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
 from services import live_check, work_artifacts, work_store, work_tickets, work_worktree
 
@@ -1513,7 +1513,9 @@ def propose(objective: str, contexts, note: str = "", proposal_key: str = "") ->
     return {"item_id": item_id}
 
 
-PUSH_GATE_TEST_TIMEOUT = TEST_RUN_TIMEOUT // 3
+PUSH_GATE_TEST_TIMEOUT = 2400
+PUSH_GATE_BUDGET = 2640
+_BASELINE_CHECKOUT_SECONDS = 420
 _GATE_TAIL = 1500
 _SHELL_SEPARATORS = ("&&", "||", ";", "|", "&", "(", ")", "\n")
 _GIT_TWO_ARG_FLAGS = ("-c", "--exec-path", "--git-dir", "--work-tree", "--namespace")
@@ -2053,7 +2055,8 @@ def _outgoing_files(repo: Path) -> list[str] | None:
     return [ln.strip() for ln in out.splitlines() if ln.strip()]
 
 
-def _gate_tests(repo: Path, ci_env: bool = True) -> dict:
+def _gate_tests(repo: Path, ci_env: bool = True,
+                timeout: int = PUSH_GATE_TEST_TIMEOUT) -> dict:
     runner = _detect_runner(repo, ci_env)
     if runner is None:
         return {"result": "no_runner", "cmd": "", "exit_code": 0, "tail": ""}
@@ -2064,7 +2067,10 @@ def _gate_tests(repo: Path, ci_env: bool = True) -> dict:
                         "found. Expected one of: .venv/bin/pytest, Pipfile, "
                         "uv.lock, poetry.lock. Install dependencies into a "
                         "local .venv, then push again."}
-    outcome = _run_repo_tests(repo, cmd, env, timeout=PUSH_GATE_TEST_TIMEOUT)
+    if timeout <= 0:
+        return {"result": "timeout", "cmd": " ".join(cmd), "exit_code": -1,
+                "tail": "the gate's time ran out before the suite could run"}
+    outcome = _run_repo_tests(repo, cmd, env, timeout=timeout)
     outcome["cmd"] = " ".join(cmd)
     return outcome
 
@@ -2243,7 +2249,7 @@ def _write_baseline(store: Path | None, outcome: dict) -> None:
 
 
 def _baseline_tests(repo: Path, base_sha: str, head_cmd: str,
-                    ci_env: bool = True) -> dict:
+                    ci_env: bool = True, timeout: int = PUSH_GATE_TEST_TIMEOUT) -> dict:
     """Run the repository's own suite at the merge base, and cache the answer.
 
     The gate exists to catch a test the change broke, not to report a suite
@@ -2256,19 +2262,30 @@ def _baseline_tests(repo: Path, base_sha: str, head_cmd: str,
     The answer is cached per repository, per base commit and per suite command,
     in a file beside the repository's git metadata, because every push runs the
     gate in a new process. `result` is "unresolved" when the baseline could not
-    be established, and the caller then keeps denying."""
+    be established, and the caller then keeps denying.
+
+    `timeout` is what is left of the push gate's time once the suite at HEAD
+    has run. The hook is killed at its own timeout with no decision, and the push
+    then goes through, so a baseline that cannot finish inside that time is
+    not started, and one that runs out of it is not cached."""
     store = _baseline_store(repo)
     with _baseline_guard:
         cached = _read_baseline(store, base_sha, head_cmd, ci_env)
         if cached is not None:
             return cached
-        outcome = _run_baseline(repo, base_sha, head_cmd, ci_env)
-        _write_baseline(store, outcome)
+        if timeout <= 0:
+            return {"result": "unresolved", "cmd": "", "base": base_sha,
+                    "head_cmd": head_cmd, "ci_env": ci_env, "at": _now_iso(),
+                    "note": "the suite at HEAD used the gate's time; the "
+                            "baseline was not run"}
+        outcome = _run_baseline(repo, base_sha, head_cmd, ci_env, timeout)
+        if outcome.get("result") != "timeout":
+            _write_baseline(store, outcome)
         return outcome
 
 
 def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
-                  ci_env: bool = True) -> dict:
+                  ci_env: bool = True, timeout: int = PUSH_GATE_TEST_TIMEOUT) -> dict:
     """One baseline run, with its checkout removed whatever happens.
 
     Every failure path returns "unresolved" rather than raising: the caller is
@@ -2304,7 +2321,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
             outcome["note"] = f"the merge base runs a different suite: {baseline_cmd}"
             return outcome
         outcome = {
-            **_run_repo_tests(tree, cmd, env, timeout=PUSH_GATE_TEST_TIMEOUT),
+            **_run_repo_tests(tree, cmd, env, timeout=timeout),
             "cmd": baseline_cmd, "base": base_sha, "head_cmd": head_cmd, "ci_env": ci_env,
             "at": _now_iso(),
             "note": "dependencies linked: " + (", ".join(linked) or "none"),
@@ -2793,20 +2810,24 @@ def gate_push(session_id: str, command: str, cwd: str) -> dict:
     A command whose repository cannot be resolved is allowed but recorded,
     because denying on a parse failure would wedge pushes the gate cannot
     even check. A command line that runs more than one push is gated once per
-    push; the first denial wins."""
+    push; the first denial wins. Every push on the line shares one deadline,
+    because the hook that runs the gate is killed at its own timeout with no
+    decision, and the command then runs ungated."""
     pushes = _parse_git_all(command, "push")
     if not pushes:
         return {"decision": "allow", "reason": "not a push"}
     result = {"decision": "allow", "reason": "lint and tests passed"}
+    deadline = time.monotonic() + PUSH_GATE_BUDGET
     for push in pushes:
         start_dir = os.path.normpath(os.path.join(cwd or ".", push["chdir"] or "."))
-        result = _gate_one_push(session_id, command, start_dir)
+        result = _gate_one_push(session_id, command, start_dir, deadline)
         if result["decision"] == "deny":
             return result
     return result
 
 
-def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
+def _gate_one_push(session_id: str, command: str, start_dir: str,
+                   deadline: float) -> dict:
     repo = _repo_root(start_dir)
     payload = {"command": command[:300], "repo": repo.name if repo else ""}
     if repo is None:
@@ -2817,8 +2838,11 @@ def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
     if files is None:
         lint = {"status": "skipped", "exit_code": 0,
                 "output": "no remote base to diff against; lint skipped"}
+    elif (left := int(deadline - time.monotonic())) > 0:
+        lint = git_util.lint_files(repo, files, min(git_util.PRE_COMMIT_TIMEOUT, left))
     else:
-        lint = git_util.lint_files(repo, files)
+        lint = {"status": "hook_failed", "exit_code": -1,
+                "output": "the gate's time ran out before lint could run"}
     payload["lint"] = {**lint, "output": lint["output"][-_GATE_TAIL:]}
     if lint["status"] not in ("pass", "no_config", "skipped"):
         work_store.record_gate(session_id, "push_gate", "fail", payload)
@@ -2838,14 +2862,17 @@ def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
         return {"decision": "allow", "reason": "no outgoing change in this repository"}
     item = work_worktree.session_item(session_id)
     ci_env = ci_env_enabled_for(item["contexts"] if item else "")
-    tests = _gate_tests(repo, ci_env)
+    tests = _gate_tests(repo, ci_env,
+                        min(PUSH_GATE_TEST_TIMEOUT, int(deadline - time.monotonic())))
     payload["tests"] = {**tests, "tail": (tests.get("tail") or "")[-_GATE_TAIL:]}
     if tests["result"] not in ("pass", "no_runner"):
         baseline = {}
         if tests["result"] == "fail" and tests.get("cmd"):
             base_sha = _merge_base(repo)
             if base_sha:
-                baseline = _baseline_tests(repo, base_sha, tests["cmd"], ci_env)
+                left = int(deadline - time.monotonic()) - _BASELINE_CHECKOUT_SECONDS
+                baseline = _baseline_tests(repo, base_sha, tests["cmd"], ci_env,
+                                           min(PUSH_GATE_TEST_TIMEOUT, left))
                 payload["baseline"] = {
                     **baseline, "tail": (baseline.get("tail") or "")[-_GATE_TAIL:]}
         if baseline.get("result") == "fail":

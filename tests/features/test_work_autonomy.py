@@ -6,6 +6,7 @@ progress lines, the stop detector, duplicate questions, the commit gate
 rewrite, auto-archiving, the proposals the board opens by itself, and the
 follow-ups it puts in front of the operator.
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -76,7 +77,7 @@ class TestDeliveryRule:
 class TestPushGateBaseline:
     def _lint_passes(self, monkeypatch):
         monkeypatch.setattr(work_launch.git_util, "lint_files",
-                            lambda repo, files: {"status": "pass", "exit_code": 0,
+                            lambda repo, files, *_: {"status": "pass", "exit_code": 0,
                                                  "output": "ok"})
 
     def test_a_suite_already_red_at_the_merge_base_allows_the_push(self, tmp_path, monkeypatch):
@@ -222,6 +223,108 @@ class TestPushGateBaseline:
         payload = json.loads(_events(item_id, "push_gate")[0]["payload"])
         assert payload["baseline"]["result"] == "unresolved"
         assert "node_modules" in payload["baseline"]["note"]
+
+    def test_the_gate_fits_inside_the_hook_timeout(self):
+        spec = importlib.util.spec_from_file_location(
+            "install_work_hooks_budget", "scripts/install_work_hooks.py")
+        hooks = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hooks)
+        assert work_launch.PUSH_GATE_TEST_TIMEOUT == 2400
+        assert work_launch.PUSH_GATE_BUDGET < hooks.PUSH_GATE_TIMEOUT
+
+    def test_a_suite_that_used_the_gate_s_time_runs_no_baseline(self, tmp_path, monkeypatch):
+        item_id, sid = _mkrun("slow red suite")
+        repo = _repo_with_origin(tmp_path)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d, *_: (["bash", "-c", "echo boom; exit 1"], {}))
+        clock = iter([0.0, 0.0, 0.0, float(work_launch.PUSH_GATE_BUDGET)])
+        monkeypatch.setattr(work_launch.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(work_launch, "_run_baseline",
+                            lambda *a, **k: pytest.fail("the baseline ran past the budget"))
+        out = work_launch.gate_push(sid, "git push", str(repo))
+        assert out["decision"] == "deny"
+        payload = json.loads(_events(item_id, "push_gate")[0]["payload"])
+        assert payload["baseline"]["result"] == "unresolved"
+        assert not work_launch._baseline_store(repo).exists()
+
+    def test_the_baseline_gets_only_the_time_that_is_left(self, tmp_path, monkeypatch):
+        _, sid = _mkrun("budgeted baseline")
+        repo = _repo_with_origin(tmp_path)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d, *_: (["bash", "-c", "echo boom; exit 1"], {}))
+        clock = iter([0.0, 0.0, 0.0, 2000.0])
+        monkeypatch.setattr(work_launch.time, "monotonic", lambda: next(clock))
+        seen = []
+
+        def timed_out(repo, base, head, ci_env, timeout):
+            seen.append(timeout)
+            return {"result": "timeout", "cmd": head, "base": base, "head_cmd": head,
+                    "ci_env": ci_env, "at": work_launch._now_iso(), "note": ""}
+
+        monkeypatch.setattr(work_launch, "_run_baseline", timed_out)
+        assert work_launch.gate_push(sid, "git push", str(repo))["decision"] == "deny"
+        assert seen == [work_launch.PUSH_GATE_BUDGET
+                        - work_launch._BASELINE_CHECKOUT_SECONDS - 2000]
+        assert not work_launch._baseline_store(repo).exists(), "a timeout is not cached"
+
+    def test_every_push_on_the_line_shares_one_deadline(self, tmp_path, monkeypatch):
+        _, sid = _mkrun("two pushes")
+        repo = _repo_with_origin(tmp_path)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d, *_: (["bash", "-c", "exit 0"], {}))
+        clock = iter([0.0, 0.0, 0.0, 1900.0, 1900.0])
+        monkeypatch.setattr(work_launch.time, "monotonic", lambda: next(clock))
+        seen = []
+
+        def passed(repo_dir, cmd, env, timeout):
+            seen.append(timeout)
+            return {"result": "pass", "exit_code": 0, "tail": ""}
+
+        monkeypatch.setattr(work_launch, "_run_repo_tests", passed)
+        out = work_launch.gate_push(sid, "git push origin a && git push origin b", str(repo))
+        assert out["decision"] == "allow"
+        assert seen == [work_launch.PUSH_GATE_TEST_TIMEOUT,
+                        work_launch.PUSH_GATE_BUDGET - 1900]
+
+    def test_a_suite_with_no_time_left_is_not_run_and_denies(self, tmp_path, monkeypatch):
+        _, sid = _mkrun("no time left")
+        repo = _repo_with_origin(tmp_path)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d, *_: (["bash", "-c", "exit 0"], {}))
+        clock = iter([0.0, 0.0, float(work_launch.PUSH_GATE_BUDGET)])
+        monkeypatch.setattr(work_launch.time, "monotonic", lambda: next(clock))
+        monkeypatch.setattr(work_launch, "_run_repo_tests",
+                            lambda *a, **k: pytest.fail("the suite ran past the budget"))
+        assert work_launch.gate_push(sid, "git push", str(repo))["decision"] == "deny"
+
+    def test_a_second_push_with_no_time_left_runs_no_lint_and_denies(self, tmp_path, monkeypatch):
+        _, sid = _mkrun("no time for lint")
+        repo = _repo_with_origin(tmp_path)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d, *_: (["bash", "-c", "exit 0"], {}))
+        monkeypatch.setattr(work_launch, "_run_repo_tests",
+                            lambda *a, **k: {"result": "pass", "exit_code": 0, "tail": ""})
+        lints = []
+
+        def lint(repo_dir, files, timeout):
+            lints.append(timeout)
+            return {"status": "pass", "exit_code": 0, "output": "ok"}
+
+        monkeypatch.setattr(work_launch.git_util, "lint_files", lint)
+        clock = iter([0.0, 0.0, 0.0, float(work_launch.PUSH_GATE_BUDGET)])
+        monkeypatch.setattr(work_launch.time, "monotonic", lambda: next(clock))
+        out = work_launch.gate_push(sid, "git push origin a && git push origin b", str(repo))
+        assert out["decision"] == "deny"
+        assert lints == [work_launch.git_util.PRE_COMMIT_TIMEOUT]
 
     def test_a_baseline_that_cannot_make_its_directory_is_unresolved(self, tmp_path, monkeypatch):
         def full_disk(prefix=""):
