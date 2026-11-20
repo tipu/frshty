@@ -30,6 +30,16 @@ RUN apt-get update && apt-get install -y unzip oathtool && \
     dpkg -i /tmp/ssm.deb && \
     rm -rf /tmp/aws /tmp/awscliv2.zip /tmp/ssm.deb && apt-get clean && rm -rf /var/lib/apt/lists/*
 
+RUN case "$(dpkg --print-architecture)" in \
+        amd64) arch=x64; sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;; \
+        arm64) arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;; \
+        *) echo "gitleaks: unsupported architecture" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz" -o /tmp/gitleaks.tar.gz && \
+    echo "${sum}  /tmp/gitleaks.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks && \
+    rm /tmp/gitleaks.tar.gz && gitleaks version
+
 WORKDIR /app
 
 RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles jsonschema mcp playwright pytest uv pipenv pre-commit && \
