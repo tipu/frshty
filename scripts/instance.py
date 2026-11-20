@@ -491,6 +491,9 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"GVOICE_CHROME_CHANNEL={gvoice_channel(config)}",
             "--memory", memory, "--memory-swap", memory,
             "--tmpfs", TMP_MOUNT]
+    cdp_url = (config.get("direct_inbox") or {}).get("gvoice_cdp_url")
+    if cdp_url:
+        args += ["-e", f"GVOICE_CDP_URL={cdp_url}"]
     if claude_config_dir(config):
         args += ["-e", f"FRSHTY_CLAUDE_CONFIG_DIR={claude_config_dir(config)}"]
     if box.get("env_file"):

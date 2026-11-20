@@ -455,6 +455,14 @@ class TestInstanceLauncher:
         config["direct_inbox"] = {"gvoice_chrome_channel": "chrome-beta"}
         assert "GVOICE_CHROME_CHANNEL=chrome-beta" in mod.run_args(config, path, check=False)
 
+    def test_gvoice_reaches_a_configured_running_chrome(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        config = mod.load(str(path))
+        assert not any(a.startswith("GVOICE_CDP_URL=") for a in mod.run_args(config, path, check=False))
+        config["direct_inbox"] = {"gvoice_cdp_url": "http://127.0.0.1:9479"}
+        assert "GVOICE_CDP_URL=http://127.0.0.1:9479" in mod.run_args(config, path, check=False)
+
     def test_gvoice_login_needs_a_display(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         path = self._config(tmp_path)
