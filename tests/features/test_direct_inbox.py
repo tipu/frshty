@@ -194,6 +194,14 @@ def test_a_failed_recent_asks_status_whether_the_session_is_signed_out():
     assert env["GVOICE_CHROME_CHANNEL"] == "chrome"
 
 
+def test_a_configured_cdp_url_reaches_gvoice():
+    status = SimpleNamespace(returncode=2, stdout="", stderr="Not signed in")
+    config = _config(gmail=False, gvoice_cdp_url="http://127.0.0.1:9479")
+    with patch.object(di.subprocess, "run", side_effect=[status, status]) as cli:
+        di.check(config, instance_key="personal", now=NOW)
+    assert cli.call_args_list[0].kwargs["env"]["GVOICE_CDP_URL"] == "http://127.0.0.1:9479"
+
+
 def test_a_failed_recent_with_a_live_session_names_no_login():
     crashed = SimpleNamespace(returncode=1, stdout="", stderr="selector changed")
     status = SimpleNamespace(returncode=0, stdout="{}", stderr="")
