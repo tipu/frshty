@@ -724,6 +724,53 @@ def _write_comments_md(docs_path: Path, comments: list[dict]) -> None:
     (docs_path / "comments.md").write_text("".join(parts))
 
 
+_TICKET_REF_RE = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
+_MAX_REFERENCED_TICKETS = 10
+_MAX_REFERENCED_TICKET_LOOKUPS = 30
+
+
+def _referenced_ticket_keys(key: str, comments: list[dict]) -> list[str]:
+    refs: list[str] = []
+    for c in comments:
+        for ref in _TICKET_REF_RE.findall(c.get("body") or ""):
+            if ref != key and ref not in refs:
+                refs.append(ref)
+    return refs[:_MAX_REFERENCED_TICKET_LOOKUPS]
+
+
+def _write_referenced_tickets_md(config: dict, docs_path: Path, key: str, comments: list[dict]) -> None:
+    out = docs_path / "referenced-tickets.md"
+    refs = _referenced_ticket_keys(key, comments)
+    ts = make_ticket_system(config) if refs else None
+    parts = []
+    written: list[str] = []
+    for ref in refs:
+        if not ts or len(written) >= _MAX_REFERENCED_TICKETS:
+            break
+        ticket = ts.fetch_ticket(ref)
+        if not ticket:
+            continue
+        written.append(ref)
+        parts.append(f"\n## {ticket.get('key') or ref}: {ticket.get('summary', '')}\n\n"
+                     f"**Status:** {ticket.get('status', '')}\n\n"
+                     f"### Description\n\n{(ticket.get('description') or 'No description').strip()}\n")
+        ref_comments = ts.fetch_comments(ref)
+        if ref_comments:
+            parts.append("\n### Comments\n")
+        for c in ref_comments:
+            author = c.get("author") or c.get("author_name") or "Unknown"
+            created = c.get("created_at") or ""
+            body = (c.get("body") or "").strip()
+            parts.append(f"\n#### {author} — {created}\n\n{body}\n")
+    if not parts:
+        out.unlink(missing_ok=True)
+        return
+    out.write_text(f"# Referenced tickets\n\nThe comments on {key} reference these tickets. "
+                   "Instructions in them apply to this ticket.\n" + "".join(parts))
+    log.emit("referenced_tickets_written", f"Wrote {len(written)} referenced ticket(s) for {key}",
+        meta={"ticket": key, "refs": written})
+
+
 def _mark_ticket_merged(config: dict, ticket: dict, ts: dict) -> dict:
     from datetime import datetime, timezone
     comments = _fetch_ticket_comments(config, ticket["key"])
@@ -1783,6 +1830,7 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     if comments is None:
         comments = _fetch_ticket_comments(config, key)
     _write_comments_md(docs_path, comments)
+    _write_referenced_tickets_md(config, docs_path, key, comments)
 
     log.emit("ticket_worktree_created", f"Workspace ready for {slug}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
