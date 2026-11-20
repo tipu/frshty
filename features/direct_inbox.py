@@ -421,6 +421,8 @@ def _gvoice_env(settings: dict) -> dict[str, str]:
         env["GVOICE_PROFILE_DIR"] = os.path.expanduser(str(settings["gvoice_profile_dir"]))
     if settings.get("gvoice_chrome_channel"):
         env["GVOICE_CHROME_CHANNEL"] = str(settings["gvoice_chrome_channel"])
+    if settings.get("gvoice_cdp_url"):
+        env["GVOICE_CDP_URL"] = str(settings["gvoice_cdp_url"])
     return env
 
 

@@ -218,6 +218,11 @@ pr_autofix = false                # github only: every PR the instance account o
 #                                     # Voice session. Sign it in once on the host with
 #                                     # scripts/instance.py gvoice-login <config>.
 # gvoice_chrome_channel = "chrome"    # the browser gvoice launches
+# gvoice_cdp_url = "http://127.0.0.1:9479"
+#                                     # the DevTools address of a running Chrome signed into
+#                                     # Google Voice. gvoice opens a tab there instead of
+#                                     # launching Chrome, because Google ends a session that
+#                                     # a second Chrome process reuses.
 
 # --- Upwork inbox (requires features.upwork and a logged-in local Chrome) ---
 # [upwork]
