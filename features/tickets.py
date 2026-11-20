@@ -24,7 +24,7 @@ from core.config import base_branch_for, get_repos, ticket_worktree_path, resolv
 from core.deps import install_worktree_deps, relink_shared_venv
 from core.claude_runner import run_haiku, parse_structured, strict_object
 from core.commit_message import merge_message_args
-from core.ticket_status import SCOPE_FIX, TEST_FIX, TicketStatus, can_transition, transition
+from core.ticket_status import SCOPE_FIX, TEST_FIX, TicketStatus, can_transition, epic_edge, transition
 from features.platforms import make_platform
 from features.pr_ci import ci_summary
 from features.ticket_systems import make_ticket_system
@@ -1498,7 +1498,7 @@ def check(config: dict, instance_key: str = ""):
             _process_ticket_comments(config, key, ts, ticket, base_url, instance_key)
 
             mapped = _resolve_status(config, ticket.get("status", ""))
-            if mapped and "slug" not in ts:
+            if mapped and "slug" not in ts and not epic_edge(ticket.get("issue_type")):
                 ts["slug"] = _make_slug(key, ticket["summary"])
                 ts["branch"] = _make_branch(config, key, ticket)
                 ts["url"] = ticket.get("url", "")

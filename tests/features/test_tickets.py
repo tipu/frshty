@@ -293,15 +293,25 @@ class TestRepoGate:
         assert tickets._repo_gate_blocked("inst", "T-2") is None
         assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
 
-    def test_planning_handler_does_not_plan_an_epic(self):
+    def test_planning_handler_parks_an_epic(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "new", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "planning")
+        state.save_ticket("T-3", {"status": "new", "slug": "y", "branch": "y",
+                                  "issue_type": "Epic"})
+        state.transition_ticket("T-3", "planning")
         with patch("features.tickets._enqueue_stage") as eq:
-            _, stop = ticket_states._handle_planning_ticket(
-                {}, {"key": "T-2", "issue_type": "Epic"}, {"status": "planning"},
+            ts, stop = ticket_states._handle_planning_ticket(
+                {}, {"key": "T-2", "issue_type": "Epic"}, state.load_ticket("T-2"),
                 "", "inst", True)
-            _, stop_persisted = ticket_states._handle_planning_ticket(
-                {}, {"key": "T-2"}, {"status": "planning", "issue_type": "Epic"},
+            ts_persisted, stop_persisted = ticket_states._handle_planning_ticket(
+                {}, {"key": "T-3"}, state.load_ticket("T-3"),
                 "", "inst", True)
         assert stop is True and stop_persisted is True
+        assert ts["status"] == ts_persisted["status"] == "epic"
+        assert state.load_ticket("T-2")["status"] == "epic"
+        assert state.load_ticket("T-3")["status"] == "epic"
         eq.assert_not_called()
 
     def test_gate_isolates_per_instance(self, fresh_db):
@@ -790,6 +800,23 @@ class TestCheckSkipsBusyTicket:
         _, saved = self._check(fake_config, [])
         assert saved["external_status"] == "In Progress"
         assert saved["summary"] == "Do the thing"
+
+
+class TestCheckParksAnInProgressEpic:
+    def test_first_sighting_of_an_in_progress_epic_parks_it(self, fake_config, tmp_state):
+        with patch("features.tickets._fetch_tickets",
+                   return_value=[make_ticket(issue_type="Epic")]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos", return_value=[{"name": "r"}]), \
+             patch("features.tickets._process_ticket_comments"), \
+             patch("features.tickets._resolve_status", return_value="planning"), \
+             patch("features.tickets._setup_ticket") as setup, \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        assert state.load_ticket("PROJ-1")["status"] == "epic"
+        setup.assert_not_called()
+        eq.assert_not_called()
 
 
 class TestCheckDoneTicketResurrection:

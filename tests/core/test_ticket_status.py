@@ -301,7 +301,7 @@ EXPECTED_EDGES = {
     "pending_approval": {"new", "done"},
     "new": {"planning", "researching", "merged", "epic"},
     "researching": {"done", "new"},
-    "planning": {"reviewing", "blocked"},
+    "planning": {"reviewing", "blocked", "epic"},
     "reviewing": {"testing", "pr_ready", "planning", "blocked"},
     "testing": {"proving", "pr_ready", "tests_failed", "reviewing", "blocked"},
     "tests_failed": {"testing", "reviewing", "pr_ready", "done"},

@@ -34,7 +34,7 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pending_approval: {TicketStatus.new, TicketStatus.done},
     TicketStatus.new:        {TicketStatus.planning, TicketStatus.researching, TicketStatus.merged, TicketStatus.epic},
     TicketStatus.researching: {TicketStatus.done, TicketStatus.new},
-    TicketStatus.planning:   {TicketStatus.reviewing, TicketStatus.blocked},
+    TicketStatus.planning:   {TicketStatus.reviewing, TicketStatus.blocked, TicketStatus.epic},
     TicketStatus.reviewing:  {TicketStatus.testing, TicketStatus.pr_ready, TicketStatus.planning, TicketStatus.blocked},
     TicketStatus.testing:    {TicketStatus.proving, TicketStatus.pr_ready, TicketStatus.tests_failed, TicketStatus.reviewing, TicketStatus.blocked},
     TicketStatus.tests_failed: {TicketStatus.testing, TicketStatus.reviewing, TicketStatus.pr_ready, TicketStatus.done},
