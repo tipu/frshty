@@ -62,7 +62,7 @@ _JOB_PHASES = {
 }
 
 _PHASE_DOCS = {
-    "plan": ["ticket.md", "comments.md", "technical-plan.md", "change-manifest.md",
+    "plan": ["ticket.md", "comments.md", "referenced-tickets.md", "technical-plan.md", "change-manifest.md",
              "change-explainer.html"],
     "review": ["tri-review.md"],
     "fix_review": ["tri-review.md"],

@@ -1583,6 +1583,62 @@ class TestWriteCommentsMd:
         assert "Reply" in out
 
 
+class TestWriteReferencedTicketsMd:
+    def _ts(self):
+        ts = MagicMock()
+        ts.fetch_ticket.side_effect = lambda k: {
+            "INFRA-323": {"key": "INFRA-323", "summary": "Change checklist",
+                          "description": "Seven steps", "status": "Done"},
+        }.get(k)
+        ts.fetch_comments.side_effect = lambda k: [
+            {"author_name": "DVD", "created_at": "2026-11-01T00:00:00Z", "body": "Step 7: use Ref INFRA-n"},
+        ] if k == "INFRA-323" else []
+        return ts
+
+    def test_keys_skip_own_and_dedupe(self):
+        refs = tickets._referenced_ticket_keys("INFRA-424", [
+            {"body": "Do the INFRA-323 steps first. INFRA-424 scope only."},
+            {"body": "See https://linear.app/acme/issue/INFRA-323/slug and INFRA-12"},
+            {"body": None},
+        ])
+        assert refs == ["INFRA-323", "INFRA-12"]
+
+    def test_writes_description_and_comments(self, tmp_path, fake_config):
+        ts = self._ts()
+        with patch("features.tickets.make_ticket_system", return_value=ts):
+            tickets._write_referenced_tickets_md(fake_config, tmp_path, "INFRA-424", [
+                {"body": "Do the seven INFRA-323 steps first. UTF-8 is fine."},
+            ])
+        out = (tmp_path / "referenced-tickets.md").read_text()
+        assert "## INFRA-323: Change checklist" in out
+        assert "Seven steps" in out
+        assert "#### DVD — 2026-11-01T00:00:00Z" in out
+        assert "Step 7: use Ref INFRA-n" in out
+        assert "UTF-8" not in out
+
+    def test_unresolved_refs_do_not_use_up_the_cap(self, tmp_path, fake_config):
+        ts = self._ts()
+        noise = " ".join(f"ISO-{n}" for n in range(1, 15))
+        with patch("features.tickets.make_ticket_system", return_value=ts):
+            tickets._write_referenced_tickets_md(fake_config, tmp_path, "INFRA-424", [
+                {"body": f"{noise} then INFRA-323"},
+            ])
+        assert "## INFRA-323: Change checklist" in (tmp_path / "referenced-tickets.md").read_text()
+
+    def test_lookups_are_bounded(self):
+        refs = tickets._referenced_ticket_keys("INFRA-424", [
+            {"body": " ".join(f"ZZ-{n}" for n in range(300))},
+        ])
+        assert len(refs) == tickets._MAX_REFERENCED_TICKET_LOOKUPS
+
+    def test_no_refs_removes_stale_file(self, tmp_path, fake_config):
+        (tmp_path / "referenced-tickets.md").write_text("stale")
+        with patch("features.tickets.make_ticket_system") as mk:
+            tickets._write_referenced_tickets_md(fake_config, tmp_path, "INFRA-424", [{"body": "no refs"}])
+        mk.assert_not_called()
+        assert not (tmp_path / "referenced-tickets.md").exists()
+
+
 class TestMarkTicketMerged:
     def test_stores_snapshot(self, fake_config):
         ts = {"status": "in_review"}

@@ -53,7 +53,7 @@ OUTPUT CONTRACT (this overrides anything else):
 - Cite file:line evidence for every claim about existing code.
 
 You are responsible for:
-- Reading the requirement files under docs/ (e.g. docs/ticket.md, docs/comments.md for upstream discussion and reviewer/QA context that often explains why a ticket bounced back, docs/technical-plan.md if present, docs/pm-findings.md if present, and any docs/notes/*.md human guidance that overrides or refines the ticket).
+- Reading the requirement files under docs/ (e.g. docs/ticket.md, docs/comments.md for upstream discussion and reviewer/QA context that often explains why a ticket bounced back, docs/referenced-tickets.md if present for the description and comments of tickets that the comments reference, whose instructions apply to this ticket, docs/technical-plan.md if present, docs/pm-findings.md if present, and any docs/notes/*.md human guidance that overrides or refines the ticket).
 - Exploring the repository worktree(s) in this directory yourself with grep/read/find.
 
 Produce a plan with these sections:
@@ -163,7 +163,9 @@ def _synthesize_and_implement(ticket_dir: Path, plan_files: list[Path],
         f"{listing}\n\n"
         "Step 1 — Synthesize: Read all of those plan files plus the "
         "requirements under docs/ (including docs/comments.md for upstream "
-        "reviewer/QA discussion, and any docs/notes/*.md human "
+        "reviewer/QA discussion, docs/referenced-tickets.md for tickets "
+        "that the comments reference, whose instructions apply to this "
+        "ticket, and any docs/notes/*.md human "
         "guidance, which is authoritative and overrides the ticket where they "
         "conflict). Reconcile them into one consensus plan; "
         "where they disagree on architecture, data model, or API, pick the "
