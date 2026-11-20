@@ -145,6 +145,27 @@ class TicketState(TypedDict, total=False):
     llm_sessions: dict
 
 
+def _park_epic(ticket: dict, ts: dict, base_url: str, existing: bool) -> tuple[dict, bool]:
+    key = ticket["key"]
+    epic = TicketStatus.epic.value
+    if ts.get("status") != epic:
+        try:
+            state.transition_ticket(key, epic, reason="auto: issue_type=Epic")
+        except state.TicketStateError:
+            pass
+        ts["status"] = epic
+        if not existing:
+            log.emit("epic_found",
+                     f"Epic tracked (not planned): {key} — {ticket.get('summary', '')}",
+                     links={"ticket": ticket.get("url", ""),
+                            "detail": f"{base_url}/tickets/{key}"},
+                     meta={"ticket": key, "issue_type": "Epic"})
+    if "summary" not in ts:
+        ts["summary"] = ticket.get("summary", "")
+    state.save_ticket(key, ts)
+    return ts, True
+
+
 def _handle_new_ticket(
     config: dict,
     ticket: dict,
@@ -161,21 +182,7 @@ def _handle_new_ticket(
     # UI can render the epic header, and return without enqueueing.
     epic = epic_edge(ticket.get("issue_type"))
     if epic:
-        if ts.get("status") != epic:
-            try:
-                state.transition_ticket(key, epic, reason="auto: issue_type=Epic")
-            except state.TicketStateError:
-                ts["status"] = epic
-            if not existing:
-                log.emit("epic_found",
-                         f"Epic tracked (not planned): {key} — {ticket.get('summary', '')}",
-                         links={"ticket": ticket.get("url", ""),
-                                "detail": f"{base_url}/tickets/{key}"},
-                         meta={"ticket": key, "issue_type": "Epic"})
-        if "summary" not in ts:
-            ts["summary"] = ticket.get("summary", "")
-        state.save_ticket(key, ts)
-        return ts, True
+        return _park_epic(ticket, ts, base_url, existing)
     if "source" not in ts:
         ts["source"] = _t._ticket_source(config)
     source = ts.get("source", _t._ticket_source(config))
@@ -267,7 +274,7 @@ def _handle_planning_ticket(
     existing: bool,
 ) -> tuple[dict, bool]:
     if "Epic" in (ticket.get("issue_type"), ts.get("issue_type")):
-        return ts, True
+        return _park_epic(ticket, ts, base_url, existing)
     if instance_key:
         _t._enqueue_stage(instance_key, ticket["key"], "start_planning")
     return ts, False
